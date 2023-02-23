@@ -9,6 +9,6 @@ The data presented in our manuscript are derived from one of 4 single-cell scree
 | Name        | Experiment           |GEO Accession  | Analysis Scripts |
 | :-------------: |:-----------:| :----:| :---:|
 | sciPlexGxE_1      | HPRT1 & MMR  GxE Screens| [GSM7056148](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM7056148)| HPRT1_MMR_GxE_screen|
-| sciPlexGxE_2| Kinome GxE Screen      |  [GSM7056149](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM7056149) | kinome_GxE_screen|
+| sciPlexGxE_2| Kinome GxE Screen      |  [GSM7056149](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM7056149) | Kinome_GxE_screen|
 | sciPlex_3 | GSC Chemical Genomic Screen      | [GSM7056150](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM7056150) | GSC_chemical_screen |
 | sciPlex_4 | Combinatorial Chemical Genomic Screen      | [GSM7056151](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM7056151)| combinatorial_chemical_screen |
