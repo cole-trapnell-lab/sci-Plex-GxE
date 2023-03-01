@@ -11,6 +11,7 @@ source("path_to_repo/sci-plex/bin/cell_cycle.R")
 source("path_to_repo/sci-plex/sci-plex/bin/viability.R")
 cc.genes = readRDS("path_to_repo/sci-plex/bin/cc.genes.RDS")
 
+### Load expression data
 cds <- readRDS("path_to_sciPlexGxE_1_preprocessed_cds.rds")
 dim(cds)
 dim(cds[,!is.na(colData(cds)$top_to_second_best_ratio_W)])
