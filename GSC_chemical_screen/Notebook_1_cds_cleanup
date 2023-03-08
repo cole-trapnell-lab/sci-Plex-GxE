@@ -1,0 +1,186 @@
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(furrr)
+library(monocle3)
+
+# Set DelayedArray Parameters
+DelayedArray:::set_verbose_block_processing(TRUE)
+options(DelayedArray.block.size = 1000e7)
+options(stringsAsFactors = FALSE)
+
+### Define functions
+calculate_aggregate_expression_score <- function(cds, signature_genes, from_id = FALSE){
+  
+  if(from_id == TRUE){
+    cds_subset = cds[rowData(cds)$id %in% signature_genes,]
+  }
+  else(cds_subset = cds[rowData(cds)$gene_short_name %in% signature_genes,])
+  aggregate_signature_expression = exprs(cds_subset)
+  aggregate_signature_expression = t(t(aggregate_signature_expression) / pData(cds_subset)$Size_Factor)
+  aggregate_signature_expression = Matrix::colSums(aggregate_signature_expression)
+  signature_score = log(aggregate_signature_expression+1)
+  return(aggregate_signature_expression)
+}
+#########################################################################################
+
+### Read in cds object output by the processing pipeline post hash assignment
+cds <- readRDS("cds_2.RDS")
+names(colData(cds))[names(colData(cds)) == 'Cell'] <- 'cell'
+
+### Add useful metadata extracted from hash labels
+colData(cds)$hash_plate <- sapply(colData(cds)$top_oligo_W,function(x){strsplit(x,"_")}[[1]][1])
+colData(cds)$hash_well <- sapply(colData(cds)$top_oligo_W,function(x){strsplit(x,"_")}[[1]][2])
+colData(cds)$GSC_line <- sapply(colData(cds)$top_oligo_W,function(x){strsplit(x,"_")}[[1]][3])
+colData(cds)$treatment <- sapply(colData(cds)$top_oligo_W,function(x){strsplit(x,"_")}[[1]][4])
+colData(cds)$dose <- as.numeric(sapply(colData(cds)$top_oligo_W,function(x){strsplit(x,"_")}[[1]][5]))
+colData(cds)$replicate <- sapply(colData(cds)$top_oligo_W,function(x){substrRight(x,5)})
+
+### Ensure that the 0 dose is labeled as vehicle
+new_treatment <- colData(cds) %>%
+  as.data.frame() %>%
+  dplyr::select(cell,dose,treatment) %>%
+  mutate(treatment = ifelse(dose == 0, "vehicle", treatment))
+
+colData(cds)$treatment <- new_treatment$treatment
+
+### Remove doublets using the sci-Plex hash
+cds <- cds[,colData(cds)$hash_umis_W >= 5 & 
+             colData(cds)$top_to_second_best_ratio_W >= 2.5 &
+             !is.na(colData(cds)$top_oligo_W)]
+
+### Use dimensionaility reduction and clustering to remove instances where cells are missassigned by hash 
+### which although rare may have large effects on downstream analyses.
+
+cds <- detect_genes(cds)
+cds <- estimate_size_factors(cds)
+
+genes_expressed_per_cell_line = colData(cds) %>%
+  as.data.frame() %>%
+  group_by(GSC_line) %>%
+  nest() %>%
+  mutate(fraction_genes = purrr::map(data, .f = function(pdata_subset, cds) {
+    cds_subset = cds[,as.character(pdata_subset$cell)]
+    cds_subset = detect_genes(cds_subset)
+    tibble(id = rowData(cds_subset)$id,
+           gene_short_name = rowData(cds_subset)$gene_short_name,
+           num_cells_expressed = rowData(cds_subset)$num_cells_expressed,
+           fraction_cells_expressed = rowData(cds_subset)$num_cells_expressed / ncol(cds_subset))
+  }, cds))
+
+genes_expressed_per_cell_line = genes_expressed_per_cell_line %>% 
+  unnest(fraction_genes) %>%
+  dplyr::select(everything(),-data)
+
+expressed_genes = genes_expressed_per_cell_line %>% 
+  filter(fraction_cells_expressed > 0.05) %>% 
+  ungroup() %>% 
+  dplyr::select(id) %>%
+  distinct()
+
+cds <- preprocess_cds(cds,
+                      method = "PCA",
+                      num_dim = 25,
+                      norm_method = "log",
+                      #use_genes = expressed_genes,
+                      verbose =  TRUE)
+
+cds <- reduce_dimension(cds,
+                        max_components = 2,
+                        reduction_method = "UMAP",
+                        umap.metric = "cosine",
+                        umap.n_neighbors = 50,
+                        umap.min_dist = 0.5,
+                        umap.fast_sgd=FALSE, 
+                        cores=1,
+                        verbose = T)
+
+colData(cds)$UMAP1 <- reducedDims(cds)[["UMAP"]][,1]
+colData(cds)$UMAP2 <- reducedDims(cds)[["UMAP"]][,2]
+
+cds <- cluster_cells(cds, resolution = 1e-5)
+
+colData(cds)$Cluster <- clusters(cds, reduction_method = "UMAP")
+colData(cds)$Partition <- partitions(cds, reduction_method = "UMAP")
+
+dir.create("UMAPs")
+
+colData(cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, color = Cluster), 
+             size = 0.01, stroke = 0) +
+  facet_wrap(~GSC_line)  +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "right",
+        legend.key.width = unit(0.2,"line"), 
+        legend.key.height = unit(0.4,"line")) +
+  guides(guides(colour = guide_legend(override.aes = list(size=2)))) +
+  ggsave("UMAPs/UMAP_by_cluster_and_cell_line.png", dpi = 600, height = 2, width = 2)
+
+colData(cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, color = treatment), 
+             size = 0.01, stroke = 0) +
+  facet_wrap(~GSC_line)  +
+  scale_color_manual("Treatment", values = c("lapatinib" = "navy","nintedanib" = "darkolivegreen",
+                                             "trametinib" = "brown4", "zstk474" = "darkcyan",
+                                             "vehicle" = "grey70")) +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "right",
+        legend.key.width = unit(0.2,"line"), 
+        legend.key.height = unit(0.4,"line")) +
+  guides(guides(colour = guide_legend(override.aes = list(size=2)))) +
+  ggsave("UMAPs/UMAP_by_treatment_and_cell_line.png", dpi = 600, height = 2, width = 2.5)
+
+### Note: If you rerun this pipeline the cluster assignments below may change depending on your environment.
+### You can identify the filtered cells from the cds object in GEO (GSM7056150_sciPlex_3_preprocessed_cds.list.rds) 
+### which are already prefiltered by this code.
+GBM4_cell_list <- row.names(colData(cds)[colData(cds)$GSC_line == "GBM4" &
+                                           colData(cds)$Cluster %in% c("1","3","5","6"),])
+# saveRDS(GBM4_cell_list,"GBM4_cell_list.RDS")
+
+GBM8_cell_list <- row.names(colData(cds)[colData(cds)$GSC_line == "GBM8" &
+                                           colData(cds)$Cluster %in% c("4"),])
+# saveRDS(GBM8_cell_list,"GBM8_cell_list.RDS")
+
+GSC0131_cell_list <- row.names(colData(cds)[colData(cds)$GSC_line == "GSC0131" &
+                                            colData(cds)$Cluster %in% c("2"),])
+# saveRDS(GSC0131_cell_list,"GSC0131_cell_list.RDS")
+
+GSC0827_cell_list <- row.names(colData(cds)[colData(cds)$GSC_line == "GSC0827" &
+                                              colData(cds)$Cluster %in% c("7"),])
+# saveRDS(GSC0827_cell_list,"GSC0827_cell_list.RDS")
+
+# Clear previous graph data #
+colData(cds)$UMAP1 <- NULL
+colData(cds)$UMAP2 <- NULL
+colData(cds)$Cluster <- NULL
+colData(cds)$Partition <- NULL
+
+cds.list <- list()
+
+cds.list[["GBM4"]] <- cds[,GBM4_cell_list]
+cds.list[["GBM8"]] <- cds[,GBM8_cell_list]
+cds.list[["GSC0131"]] <- cds[,GSC0131_cell_list]
+cds.list[["GSC0827"]] <- cds[,GSC0827_cell_list]
+
+for(cell_line in names(cds.list)){
+  colData(cds.list[[cell_line]]) %>%
+    as.data.frame() %>%
+    group_by(treatment,dose) %>%
+    summarize(count = n()) %>%
+    arrange(desc(treatment),dose) %>%
+    print()
+}
+
+# Object below is equivalent to GSM7056150_sciPlex_3_preprocessed_cds.list.rds from the GEO repository.
+# saveRDS(cds.list,"GSC_cds.list.rds")
+
+
+
+

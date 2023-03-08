@@ -1,0 +1,102 @@
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(monocle3)
+
+# Set DelayedArray Parameters
+DelayedArray:::set_verbose_block_processing(TRUE)
+options(DelayedArray.block.size=1000e7)
+options(stringsAsFactors = FALSE)
+
+### Define Functions
+calculate_aggregate_expression_score <- function(cds, signature_genes, from_id = FALSE){
+  
+  if(from_id == TRUE){
+    cds_subset = cds[rowData(cds)$id %in% signature_genes,]
+  }
+  else(cds_subset = cds[rowData(cds)$gene_short_name %in% signature_genes,])
+  aggregate_signature_expression = exprs(cds_subset)
+  aggregate_signature_expression = t(t(aggregate_signature_expression) / pData(cds_subset)$Size_Factor)
+  aggregate_signature_expression = Matrix::colSums(aggregate_signature_expression)
+  signature_score = log(aggregate_signature_expression+1)
+  return(aggregate_signature_expression)
+}
+###############################################################################################
+### Load in data from notebook 1 cleanup
+cds.list <- readRDS("GGSM7056150_sciPlex_3_preprocessed_cds.list.rds")
+
+### Load information on conserved gene modules
+Jaccard_collapsed_clusters <- readRDS("Jaccard_collapsed_up_and_down_regulated_clusters_cutree.rds")
+
+upregulated_dose_responsive_genes <- Jaccard_collapsed_clusters %>%
+  filter(super_cluster_id == "upregulated_super_cluster_1") %>%
+  pull(id)
+
+downregulated_dose_responsive_genes <- Jaccard_collapsed_clusters %>%
+  filter(super_cluster_id == "downregulated_super_cluster_2") %>%
+  pull(id)
+
+for(cell_line in names(cds.list)){
+  colData(cds.list[[cell_line]])$upregulated_super_cluster_score <- calculate_aggregate_expression_score(cds.list[[cell_line]],upregulated_super_cluster_1_genes,from_id=TRUE)
+  colData(cds.list[[cell_line]])$downregulated_super_cluster_score <- calculate_aggregate_expression_score(cds.list[[cell_line]],downregulated_super_cluster_2_genes,from_id=TRUE)
+}
+
+### Plot the expression of signature scores as a fuction of dose for all 4 treatment.
+### Note: The code below will produce the figure files from Supplemental Figure 6M and 6N.
+### These will be entitled:
+# Supplemental Figure 6M:
+# Upregulated_signature_score_upon_trametinib_exposure_in_GBM4.png
+# Upregulated_signature_score_upon_trametinib_exposure_in_GBM8.png
+# Upregulated_signature_score_upon_trametinib_exposure_in_GSC0131.png
+# Upregulated_signature_score_upon_trametinib_exposure_in_GSC0827.png
+# Supplemental Figure 6N:
+# Downregulated_signature_score_upon_trametinib_exposure_in_GBM4.png
+# Downregulated_signature_score_upon_trametinib_exposure_in_GBM8.png
+# Downregulated_signature_score_upon_trametinib_exposure_in_GSC0131.png
+# Downregulated_signature_score_upon_trametinib_exposure_in_GSC0827.png
+
+for(cell_line in names(cds.list)){
+  
+  for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+    
+    upregulated_plot_title <- paste0("Signature_scores/Upregulated_signature_score_upon_",drug,"_exposure_in_",cell_line,".png")
+    downregulated_plot_title <- paste0("Signature_scores/Downregulated_signature_score_upon_",drug,"_exposure_in_",cell_line,".png")
+    
+    drug_label <- paste0("[",drug,"]\n(µM)")
+    
+    df_subset <- colData(cds.list[[cell_line]]) %>%
+      as.data.frame() %>%
+      filter(treatment %in% c("vehicle",drug))
+    
+    ggplot(df_subset,aes(x = as.character(dose), y = upregulated_super_cluster_score, fill = as.character(dose))) +
+      geom_violin(size = 0.1) +
+      stat_summary(fun.data=mean_sdl, geom="pointrange", color="black", size = 0.1, stroke = 0.2) +
+      facet_wrap(~GSC_line, ncol = 4) +
+      scale_fill_manual(values = c("0" = "gray","1" = "#E65164FF","10" = "#FEC287FF")) +
+      theme(text = element_text(size = 6),
+            legend.position = "none") +
+      ylab("Upregulated\nsignature") +
+      xlab(drug_label) +
+      monocle3:::monocle_theme_opts() +
+      ggsave(upregulated_plot_title, 
+             width = 0.85,
+             height = 1.25, 
+             dpi = 600)
+    
+    ggplot(df_subset,aes(x = as.character(dose), y = downregulated_super_cluster_score, fill = as.character(dose))) +
+      geom_violin(size = 0.1) +
+      stat_summary(fun.data=mean_sdl, geom="pointrange", color="black", size = 0.1, stroke = 0.2) +
+      facet_wrap(~GSC_line, ncol = 4) +
+      scale_fill_manual(values = c("0" = "gray","1" = "#E65164FF","10" = "#FEC287FF")) +
+      theme(text = element_text(size = 6),
+            legend.position = "none") +
+      ylab("Downregulated\nsignature") +
+      xlab(drug_label) +
+      monocle3:::monocle_theme_opts() +
+      ggsave(downregulated_plot_title, 
+             width = 0.85,
+             height = 1.25, 
+             dpi = 600)
+  }
+}
