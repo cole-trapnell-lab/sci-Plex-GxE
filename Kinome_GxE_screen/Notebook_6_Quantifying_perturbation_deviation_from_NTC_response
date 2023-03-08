@@ -1,0 +1,994 @@
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(furrr)
+library(piano)
+library(speedglm)
+library(broom)
+library(monocle3)
+
+# Set DelayedArray Parameters
+DelayedArray:::set_verbose_block_processing(TRUE)
+options(DelayedArray.block.size = 1000e7)
+options(stringsAsFactors = FALSE)
+
+### Source files and functions including those from our previous sci-plex repository 
+### (https://github.com/cole-trapnell-lab/sci-plex)
+source("sci-plex/bin/cell_cycle.R")
+cc.genes = readRDS("sci-plex/bin/cc.genes.RDS")
+
+#################################################################################
+
+# Define functions for calculating angular distance -----------------------
+
+bin.ang.distance = function(cell1, cell2, count.mat) {
+  
+  cell_1 = 
+    count.mat[,cell1] %>% 
+    unit_vector()
+  cell_2 = 
+    count.mat[,cell2] %>% 
+    unit_vector()
+  
+  ang.dist = angular_distance(cell_1,cell_2)
+  
+  return(ang.dist)
+}
+
+# Calculate the norm of a vector
+norm_vec  =
+  function(x) {
+    sqrt(sum(x^2))
+  }
+
+# Compute the angular distance between two cells
+angular_distance = 
+  function(cell_1, cell_2){
+    if(identical(cell_1,cell_2)){
+      0
+    }
+    else{
+      (2/pi * acos(cell_1 %*% cell_2 /(norm_vec(cell_1) * norm_vec(cell_2))))^2
+    }
+  }
+
+# Rescale so that the magnitude of the vector is unit
+unit_vector = 
+  function(vector){
+    vector / norm_vec(vector)
+  }
+
+# Take a normalized expression count matrix
+# Return the unit mean vector for that matrix
+unit_mean =
+  function(count_matrix){
+    Matrix::rowSums(count_matrix) %>%
+      unit_vector()
+  }
+
+calculate_pairwise_perturbed_angular_distances <- function(cds, feature_genes, from_proportions = FALSE, cores = 1){
+  
+  treatment.list <- list()
+  
+  treatments = as.character(unique(colData(cds)$treatment))
+
+  cds <- cds[feature_genes,]
+  colData(cds) <- colData(cds)[,c("cell","Size_Factor", "dose","treatment","gene_id","replicate")]
+
+  colData(cds)$dose_character <- as.character(colData(cds)$dose)
+  
+  for (drug in treatments){
+    
+    dose.list <- list()
+    
+    this.treatment = drug
+
+    NTC_ref_replicate1_cds <- cds[,colData(cds)$dose == max(unique(colData(cds)$dose)) & 
+                                   colData(cds)$gene_id == "NTC" & 
+                                   colData(cds)$treatment == this.treatment & 
+                                   colData(cds)$replicate == "replicate_1"]
+
+    NTC_ref_replicate2_cds <- cds[,colData(cds)$dose == max(unique(colData(cds)$dose)) & 
+                                   colData(cds)$gene_id == "NTC" & 
+                                   colData(cds)$treatment == this.treatment & 
+                                   colData(cds)$replicate == "replicate_2"]                               
+
+    NTC_ref_replicate_1_mean_matrix <- monocle3:::normalize_expr_data(NTC_ref_replicate1_cds, norm_method = "size_only")
+    NTC_ref_replicate_1_mean_matrix <- data.frame(row.names = names(rowMeans(NTC_ref_replicate_1_mean_matrix)),NTC_ref_mean_replicate_1 =  rowMeans(NTC_ref_replicate_1_mean_matrix)) %>%
+      as.matrix() %>%
+      as("dgCMatrix")
+
+    NTC_ref_replicate_2_mean_matrix <- monocle3:::normalize_expr_data(NTC_ref_replicate2_cds, norm_method = "size_only")
+    NTC_ref_replicate_2_mean_matrix <- data.frame(row.names = names(rowMeans(NTC_ref_replicate_2_mean_matrix)),NTC_ref_mean_replicate_2 =  rowMeans(NTC_ref_replicate_2_mean_matrix)) %>%
+      as.matrix() %>%
+      as("dgCMatrix")
+
+    NTC_ref_mean_matrix <- cbind(NTC_ref_replicate_1_mean_matrix,NTC_ref_replicate_2_mean_matrix)
+
+    cds_exprs <-  monocle3:::normalize_expr_data(cds, norm_method = "size_only")
+    message("Features of mean max treated NTC cells agree with dataset ", identical(row.names(cds_exprs), row.names(NTC_ref_mean_matrix)))
+    message("Calculating distance to ", ncol(NTC_ref_replicate1_cds) + ncol(NTC_ref_replicate2_cds)," NTC cells")
+
+    cds_exprs <- cbind(cds_exprs,NTC_ref_mean_matrix)
+
+    cds_colData <- colData(cds)
+    NTC_colData <- data.frame(matrix(ncol = ncol(cds_colData), nrow = 2))
+    colnames(NTC_colData) <- colnames(cds_colData)
+    row.names(NTC_colData) <- c("NTC_ref_mean_replicate_1","NTC_ref_mean_replicate_2")
+    NTC_colData$cell <- row.names(NTC_colData)
+    NTC_colData$Size_Factor <- c(1,1)
+    NTC_colData$dose <- c(max(unique(colData(cds)$dose)),max(unique(colData(cds)$dose)))
+    NTC_colData$treatment <- c(this.treatment,this.treatment)
+    NTC_colData$gene_id <- c("NTC_ref_mean","NTC_ref_mean")
+    NTC_colData$replicate <- c("replicate_1","replicate_2")
+
+    cds_colData <- rbind(cds_colData,NTC_colData)
+    cds_colData$Size_Factor <- 1
+
+    cds_rowData <- rowData(cds)
+
+    cds <- monocle3::new_cell_data_set(expression_data = cds_exprs, cell_metadata = cds_colData, gene_metadata = cds_rowData)
+
+    colData(cds)$dose_character <- as.character(colData(cds)$dose)
+    NTC_cells <- c("NTC_ref_mean_replicate_1","NTC_ref_mean_replicate_2")
+
+    print(length(NTC_cells))
+    
+    for(dose in sort(as.character(unique(colData(cds)$dose_character)))){
+      
+      message(paste0("Determining the pairwise angular distance to  NTC  of ",dose, " µM ",drug," exposed cells"))
+      
+      this.dose = dose
+      
+      target.list = list()
+      
+      for(target in sort(unique(colData(cds)$gene_id))){
+        
+        this.target = target 
+
+          cells_of_interest = 
+            colData(cds) %>% 
+            as.data.frame() %>%
+            dplyr::mutate(dose_character = as.character(dose_character)) %>%
+            filter(dose_character == this.dose,
+                   gene_id == this.target,
+                   treatment == this.treatment) %>%
+            pull(cell) %>%
+            as.character()#)
+
+        # Select only cells that have more than 10 examples
+        if(length(cells_of_interest) > 1){
+          
+          # Get a pairwise pairing of every set of cells 
+
+          pairwise_cell_mat = expand.grid(cells_of_interest,NTC_cells)
+          colnames(pairwise_cell_mat) = c("cell_1","cell_2")
+          pairwise_cell_mat$cell_1 <- as.character(pairwise_cell_mat$cell_1)
+          pairwise_cell_mat$cell_2 <- as.character(pairwise_cell_mat$cell_2)
+
+          # Remove rows where the two cells in comparison are the same
+          pairwise_cell_mat =
+            pairwise_cell_mat %>%
+            filter(cell_1 != cell_2)
+          
+          pairwise_cell_mat$treatment = this.treatment
+          pairwise_cell_mat$dose = this.dose
+          pairwise_cell_mat$gene_id = this.target
+          pairwise_cell_mat$total_cells = dim(pairwise_cell_mat)[1]
+          
+          #### To do, calculate angular distance on drug-dependent DEGs
+          temp_cds = 
+            cds[,union(cells_of_interest,NTC_cells)]
+          
+          if(from_proportions == FALSE){
+            temp_cds = estimate_size_factors(temp_cds)
+            
+            count_mat =
+              temp_cds %>%
+              monocle3:::normalize_expr_data(norm_method = "log",
+                                             pseudo_count = 1) 
+          }
+          
+          else(count_mat = exprs(temp_cds))
+
+          pairwise_cell_mat_subset = pairwise_cell_mat
+          
+          pairwise_cell_mat_subset$ang.distance =
+            with(pairwise_cell_mat_subset, mcmapply(function(x, y) {
+              bin.ang.distance(x, y, count_mat)
+            }, cell_1, cell_2, mc.cores = cores))
+
+          target.list[[this.target]] = 
+            pairwise_cell_mat_subset
+          message("finished ",target)
+        }
+        
+      }
+      
+      dose.list[[as.character(this.dose)]] = target.list
+      dose.list[[dose]] <- do.call("rbind",dose.list[[dose]])
+      
+    } 
+    
+    treatment.list[[drug]] <- do.call("rbind",dose.list)
+    
+  }
+  
+  treatment_df <- do.call("rbind",treatment.list)
+  return(treatment_df)
+}
+
+fit_distance_models <- function(df_subset,df, drug = drug, pseudocount = 0.01){
+
+  target = unique(df_subset$target)
+  df_to_test = df %>% 
+    filter(treatment %in% c("vehicle",drug) & gene_id %in% c(target,"NTC")) %>%
+    mutate(gene_id = factor(gene_id, levels = c("NTC",target)),
+           dose = as.numeric(dose))
+
+  angular_diff_test <- speedglm::speedglm(data = df_to_test, 
+                           formula = log(ang.distance) ~ log(dose + pseudocount) + gene_id + gene_id:log(dose + pseudocount))
+
+  angular_diff_test <- broom::tidy(angular_diff_test)
+  angular_diff_test$p.value <- as.numeric(angular_diff_test$p.value)
+  angular_diff_test$treatment <- rep(drug,dim(angular_diff_test)[1])
+  angular_diff_test$gene_id <- rep(target,dim(angular_diff_test)[1])
+
+
+  return(angular_diff_test)
+
+}
+
+######
+calculate_aggregate_expression_score <- function(cds, signature_genes, from_id = FALSE){
+
+  if(from_id == TRUE){
+    cds_subset = cds[rowData(cds)$id %in% signature_genes,]
+  }
+  else(cds_subset = cds[rowData(cds)$gene_short_name %in% signature_genes,])
+  aggregate_signature_expression = exprs(cds_subset)
+  aggregate_signature_expression = t(t(aggregate_signature_expression) / pData(cds_subset)$Size_Factor)
+  aggregate_signature_expression = Matrix::colSums(aggregate_signature_expression)
+  aggregate_signature_expression = log(aggregate_signature_expression+1)
+  return(aggregate_signature_expression)
+}
+
+test_signature_kd_dependence <- function(signature_cds_subset, 
+  signature_cds, 
+  reference_cells=NULL, 
+  min_fraction_cells=0.05, 
+  pseudodose=0.001, 
+  residualModelFormulaTerms=NULL){
+
+  cell_ids_to_test = as.character(signature_cds_subset$cell)
+  print(length(cell_ids_to_test))
+
+  signature_cds_subset = signature_cds[,union(cell_ids_to_test, reference_cells)]
+
+  target = unique(pData(signature_cds_subset)$gene_id)
+  target = target[target != "NTC"]
+
+  colData(signature_cds_subset)$gene_id <- factor(colData(signature_cds_subset)$gene_id, 
+                                                  levels = c("NTC",target))
+
+  message(paste("Testing cells perturbed for", target))
+  message(paste("Fitting knockdown effect models to", nrow(signature_cds_subset), "genes"))
+
+  #colData(signature_cds_subset)$pseudodose <- log(colData(signature_cds_subset)$dose + pseudodose)
+
+  modelFormulaStr = "~gene_id + replicate + log(dose + 0.001)"
+
+  if (is.null(residualModelFormulaTerms) == FALSE & length(residualModelFormulaTerms) > 0){
+    for (i in (1:length(residualModelFormulaTerms))){
+      if (length(unique(pData(signature_cds_subset)[,residualModelFormulaTerms[i]])) > 1){
+        modelFormulaStr = paste(modelFormulaStr, "+", residualModelFormulaTerms[i])
+      }
+    }
+  }
+  
+  model_tbl = fit_models(signature_cds_subset, 
+                         model_formula_str = modelFormulaStr, 
+                         reltol=1e-5, 
+                         verbose=TRUE)
+  model_coefs = coefficient_table(model_tbl) %>% dplyr::select(-model,-model_summary)
+  model_coefs
+
+}
+#######
+#######################################################################
+
+### Load dataset. Corresponds to GSM7056149_sciPlexGxE_2_preprocessed_cds.list.RDS in the GEO repository.
+cds.list <- readRDS("cds.list.RDS")
+
+### Filter dataset for cells expressing 1 sgRNA and remove MT encoded genes from downstream analyses.
+MT_genes <- read.table("MT_genes.txt", header = FALSE)
+MT_genes <- as.character(MT_genes$V1)
+
+for(cell_type in names(cds.list)){
+
+  print(dim(cds.list[[cell_type]]))
+
+  cds.list[[cell_type]] <- cds.list[[cell_type]][!(rowData(cds.list[[cell_type]])$gene_short_name %in% MT_genes),
+                                                 !is.na(colData(cds.list[[cell_type]])$gene_id) &
+                                                 colData(cds.list[[cell_type]])$guide_number == 1]
+
+  cds.list[[cell_type]] <- estimate_size_factors(cds.list[[cell_type]])
+  cds.list[[cell_type]] <-detect_genes(cds.list[[cell_type]])
+
+  print(dim(cds.list[[cell_type]]))
+  print(median(colData(cds.list[[cell_type]])$n.umi))
+
+}
+
+Jaccard_collapsed_clusters <- readRDS("Jaccard_collapsed_up_and_down_regulated_clusters_cutree.rds")
+
+upregulated_dose_responsive_genes <- Jaccard_collapsed_clusters %>%
+  filter(super_cluster_id == "upregulated_super_cluster_1") %>%
+  pull(id)
+
+downregulated_dose_responsive_genes <- Jaccard_collapsed_clusters %>%
+  filter(super_cluster_id == "downregulated_super_cluster_2") %>%
+  pull(id)
+
+### Calculate the pairwise transcriptome distance between every cell and the mean expression of NTC cells
+### exposed to the top dose of each drug 
+### Note: Given the size of the dataset this can be somewhat memory intensive. You can remove overhead 
+### by only keeping the subset of cells being tested 
+
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <- list()
+
+for(cell_type in "A172"){
+
+  A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]] <-  list()
+
+  for(drug in c("lapatinib","nintedanib","trametinib","zstk474","vehicle")){
+
+    cds_subset <- cds.list[[cell_type]][,colData(cds.list[[cell_type]])$treatment == drug &
+                                          colData(cds.list[[cell_type]])$gRNA_maxCount >= 5]
+
+    A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]][[drug]] <- calculate_pairwise_perturbed_angular_distances(cds = cds_subset,
+                                                                                                                              feature_genes = upregulated_dose_responsive_genes,
+                                                                                                                              cores = 1)
+  }
+
+}
+
+# saveRDS(A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list,"A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["A172"]])
+
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <- list()
+
+for(cell_type in "T98G"){
+
+  T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]] <-  list()
+
+  for(drug in c("lapatinib","nintedanib","trametinib","zstk474","vehicle")){
+
+    cds_subset <- cds.list[[cell_type]][,colData(cds.list[[cell_type]])$treatment == drug &
+                                          colData(cds.list[[cell_type]])$gRNA_maxCount >= 5]
+
+    T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]][[drug]] <- calculate_pairwise_perturbed_angular_distances(cds = cds_subset,
+                                                                                                                              feature_genes = upregulated_dose_responsive_genes,
+                                                                                                                              cores = 1)
+  }
+
+}
+
+# saveRDS(T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list,"T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["T98G"]])
+
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <- list()
+
+for(cell_type in "U87MG"){
+
+  U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]] <-  list()
+
+  for(drug in c("lapatinib","nintedanib","trametinib","zstk474","vehicle")){
+
+    cds_subset <- cds.list[[cell_type]][,colData(cds.list[[cell_type]])$treatment == drug &
+                                          colData(cds.list[[cell_type]])$gRNA_maxCount >= 5]
+
+    U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]][[drug]] <- calculate_pairwise_perturbed_angular_distances(cds = cds_subset,
+                                                                                                                              feature_genes = upregulated_dose_responsive_genes,
+                                                                                                                              cores = 1)
+  }
+
+}
+
+# saveRDS(U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list,"U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["U87MG"]])
+
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <- list()
+
+for(cell_type in "A172"){
+
+  A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]] <-  list()
+
+  for(drug in c("lapatinib","nintedanib","trametinib","zstk474","vehicle")){
+
+    cds_subset <- cds.list[[cell_type]][,colData(cds.list[[cell_type]])$treatment == drug &
+                                          colData(cds.list[[cell_type]])$gRNA_maxCount >= 5]
+
+    A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]][[drug]] <- calculate_pairwise_perturbed_angular_distances(cds = cds_subset,
+                                                                                                                              feature_genes = downregulated_dose_responsive_genes,
+                                                                                                                              cores = 1)
+  }
+
+}
+
+# saveRDS(A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list,"A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["A172"]])
+
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <- list()
+
+for(cell_type in "T98G"){
+
+  T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]] <-  list()
+
+  for(drug in c("lapatinib","nintedanib","trametinib","zstk474","vehicle")){
+
+    cds_subset <- cds.list[[cell_type]][,colData(cds.list[[cell_type]])$treatment == drug &
+                                          colData(cds.list[[cell_type]])$gRNA_maxCount >= 5]
+
+    T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]][[drug]] <- calculate_pairwise_perturbed_angular_distances(cds = cds_subset,
+                                                                                                                              feature_genes = downregulated_dose_responsive_genes,
+                                                                                                                              cores = 1)
+  }
+
+}
+
+# saveRDS(T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list,"T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["T98G"]])
+
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <- list()
+
+for(cell_type in "U87MG"){
+
+  U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]] <-  list()
+
+  for(drug in c("lapatinib","nintedanib","trametinib","zstk474","vehicle")){
+
+    cds_subset <- cds.list[[cell_type]][,colData(cds.list[[cell_type]])$treatment == drug &
+                                          colData(cds.list[[cell_type]])$gRNA_maxCount >= 5]
+
+    U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[[cell_type]][[drug]] <- calculate_pairwise_perturbed_angular_distances(cds = cds_subset,
+                                                                                                                              feature_genes = downregulated_dose_responsive_genes,
+                                                                                                                              cores = 1)
+  }
+
+}
+
+# saveRDS(U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list,"U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["U87MG"]])
+
+
+### Fit a glm to the relationship between pairwise transcriptome distance on genotype, dose and their interaction.
+### Use the wald test to identify genotypes with a significant from NTC response.
+### Tests below take into account bacth effects by looking at distances within a replicate
+
+colData_df.list <- list()
+colData_df.list[["A172"]] <- colData(cds.list[["A172"]])
+colData_df.list[["T98G"]] <- colData(cds.list[["T98G"]])
+colData_df.list[["U87MG"]] <- colData(cds.list[["U87MG"]])
+
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["A172"]])
+
+A172_NTC_replicate_df <- data.frame(NTC_cell = c("NTC_ref_mean_replicate_1","NTC_ref_mean_replicate_2"),
+                                    NTC_replicate = c("replicate_1","replicate_2"))
+
+A172_replicate_df <- colData_df.list[["A172"]] %>%
+  as.data.frame() %>%
+  mutate(target_cell = cell, target_replicate = replicate) %>%
+  dplyr::select(target_cell, target_replicate)
+
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$target_cell <- A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_1
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$NTC_cell <- A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_2
+
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,A172_NTC_replicate_df, by = "NTC_cell")
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,A172_replicate_df, by = "target_cell")
+
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+  filter(NTC_replicate == target_replicate)
+
+options(future.globals.maxSize = 891289600 * 10)
+plan(multiprocess, workers = 15)
+
+A172_upregulated_dose_responsive_genes_angular_distance_test_res.list <- list()
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+A172_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] =
+  A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+  filter(gene_id != "NTC") %>%
+  mutate(target = gene_id) %>%
+  group_by(gene_id) %>%
+  nest() %>%
+  mutate(
+    test_res = furrr::future_map(
+      data,
+      .f = fit_distance_models,
+      df = A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,
+      drug=drug,
+      .progress = FALSE
+    )
+  )
+  print(paste("finished",drug))
+}
+
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+
+A172_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- A172_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>%
+  dplyr::select(-data)
+
+}
+
+# saveRDS(A172_upregulated_dose_responsive_genes_angular_distance_test_res.list,"A172_upregulated_dose_responsive_genes_angular_distance_test_res_mean_ref.list.rds")
+
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["T98G"]])
+
+T98G_NTC_replicate_df <- A172_NTC_replicate_df
+
+T98G_replicate_df <- colData_df.list[["T98G"]] %>%
+  as.data.frame() %>%
+  mutate(target_cell = cell, target_replicate = replicate) %>%
+  dplyr::select(target_cell, target_replicate)
+
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$target_cell <- T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_1
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$NTC_cell <- T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_2
+
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,T98G_NTC_replicate_df, by = "NTC_cell")
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,T98G_replicate_df, by = "target_cell")
+
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+  filter(NTC_replicate == target_replicate)
+
+options(future.globals.maxSize = 891289600 * 10)
+plan(multiprocess, workers = 15)
+
+T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list <- list()
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] =
+    T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+    filter(gene_id != "NTC") %>%
+    mutate(target = gene_id) %>%
+    group_by(gene_id) %>%
+    nest() %>%
+    mutate(
+      test_res = furrr::future_map(
+        data,
+        .f = fit_distance_models,
+        df = T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,
+        drug=drug,
+        .progress = FALSE
+      )
+    )
+  print(paste("finished",drug))
+}
+
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  
+  T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>%
+    dplyr::select(-data)
+  
+}
+
+# saveRDS(T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list,"T98G_upregulated_dose_responsive_genes_angular_distance_test_res_mean_ref.list.rds")
+
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["U87MG"]])
+
+U87MG_NTC_replicate_df <- A172_NTC_replicate_df
+
+U87MG_replicate_df <- colData_df.list[["U87MG"]] %>%
+  as.data.frame() %>%
+  mutate(target_cell = cell, target_replicate = replicate) %>%
+  dplyr::select(target_cell, target_replicate)
+
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$target_cell <- U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_1
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$NTC_cell <- U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_2
+
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,U87MG_NTC_replicate_df, by = "NTC_cell")
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,U87MG_replicate_df, by = "target_cell")
+
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+  filter(NTC_replicate == target_replicate)
+
+options(future.globals.maxSize = 891289600 * 10)
+plan(multiprocess, workers = 15)
+
+U87MG_upregulated_dose_responsive_genes_angular_distance_test_res.list <- list()
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  U87MG_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] =
+    U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+    filter(gene_id != "NTC") %>%
+    mutate(target = gene_id) %>%
+    group_by(gene_id) %>%
+    nest() %>%
+    mutate(
+      test_res = furrr::future_map(
+        data,
+        .f = fit_distance_models,
+        df = U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,
+        drug=drug,
+        .progress = FALSE
+      )
+    )
+  print(paste("finished",drug))
+}
+
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  
+  U87MG_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- U87MG_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>%
+    dplyr::select(-data)
+  
+}
+
+# saveRDS(U87MG_upregulated_dose_responsive_genes_angular_distance_test_res.list,"U87MG_upregulated_dose_responsive_genes_angular_distance_test_res_mean_ref.list.rds")
+
+##### Here
+
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["A172"]])
+
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$target_cell <- A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_1
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$NTC_cell <- A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_2
+
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,A172_NTC_replicate_df, by = "NTC_cell")
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,A172_replicate_df, by = "target_cell")
+
+A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+  filter(NTC_replicate == target_replicate)
+
+options(future.globals.maxSize = 891289600 * 10)
+plan(multiprocess, workers = 15)
+
+A172_downregulated_dose_responsive_genes_angular_distance_test_res.list <- list()
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  A172_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] =
+    A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+    filter(gene_id != "NTC") %>%
+    mutate(target = gene_id) %>%
+    group_by(gene_id) %>%
+    nest() %>%
+    mutate(
+      test_res = furrr::future_map(
+        data,
+        .f = fit_distance_models,
+        df = A172_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,
+        drug=drug,
+        .progress = FALSE
+      )
+    )
+  print(paste("finished",drug))
+}
+
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  
+  A172_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- A172_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>%
+    dplyr::select(-data)
+  
+}
+
+# saveRDS(A172_downregulated_dose_responsive_genes_angular_distance_test_res.list,"A172_downregulated_dose_responsive_genes_angular_distance_test_res_mean_ref.list.rds")
+
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["T98G"]])
+
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$target_cell <- T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_1
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$NTC_cell <- T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_2
+
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,T98G_NTC_replicate_df, by = "NTC_cell")
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,T98G_replicate_df, by = "target_cell")
+
+T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+  filter(NTC_replicate == target_replicate)
+
+options(future.globals.maxSize = 891289600 * 10)
+plan(multiprocess, workers = 15)
+
+T98G_downregulated_dose_responsive_genes_angular_distance_test_res.list <- list()
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  T98G_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] =
+    T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+    filter(gene_id != "NTC") %>%
+    mutate(target = gene_id) %>%
+    group_by(gene_id) %>%
+    nest() %>%
+    mutate(
+      test_res = furrr::future_map(
+        data,
+        .f = fit_distance_models,
+        df = T98G_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,
+        drug=drug,
+        .progress = FALSE
+      )
+    )
+  print(paste("finished",drug))
+}
+
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  
+  T98G_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- T98G_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>%
+    dplyr::select(-data)
+  
+}
+
+# saveRDS(T98G_downregulated_dose_responsive_genes_angular_distance_test_res.list,"T98G_downregulated_dose_responsive_genes_angular_distance_test_res_mean_ref.list.rds")
+
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["U87MG"]])
+
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$target_cell <- U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_1
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$NTC_cell <- U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df$cell_2
+
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,U87MG_NTC_replicate_df, by = "NTC_cell")
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- left_join(U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,U87MG_replicate_df, by = "target_cell")
+
+U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+  filter(NTC_replicate == target_replicate)
+
+options(future.globals.maxSize = 891289600 * 10)
+plan(multiprocess, workers = 15)
+
+U87MG_downregulated_dose_responsive_genes_angular_distance_test_res.list <- list()
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  U87MG_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] =
+    U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df %>%
+    filter(gene_id != "NTC") %>%
+    mutate(target = gene_id) %>%
+    group_by(gene_id) %>%
+    nest() %>%
+    mutate(
+      test_res = furrr::future_map(
+        data,
+        .f = fit_distance_models,
+        df = U87MG_downregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df,
+        drug=drug,
+        .progress = FALSE
+      )
+    )
+  print(paste("finished",drug))
+}
+
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  
+  U87MG_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- U87MG_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>%
+    dplyr::select(-data)
+  
+}
+
+# saveRDS(U87MG_downregulated_dose_responsive_genes_angular_distance_test_res.list,"U87MG_downregulated_dose_responsive_genes_angular_distance_test_res_mean_ref.list.rds")
+
+########################
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+  
+  A172_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- A172_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>% ungroup() %>% dplyr::select(test_res)
+  T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>% ungroup() %>% dplyr::select(test_res)
+  U87MG_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- U87MG_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>% ungroup() %>% dplyr::select(test_res)
+  
+}
+
+A172_upregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",A172_upregulated_dose_responsive_genes_angular_distance_test_res.list)
+T98G_upregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list)
+U87MG_upregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",U87MG_upregulated_dose_responsive_genes_angular_distance_test_res.list)
+
+A172_upregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",A172_upregulated_dose_responsive_genes_angular_distance_test_res_df$test_res)
+T98G_upregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",T98G_upregulated_dose_responsive_genes_angular_distance_test_res_df$test_res)
+U87MG_upregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",U87MG_upregulated_dose_responsive_genes_angular_distance_test_res_df$test_res)
+
+A172_upregulated_dose_responsive_genes_angular_distance_test_res_df$cell_line <- rep("A172",dim(A172_upregulated_dose_responsive_genes_angular_distance_test_res_df)[1])
+T98G_upregulated_dose_responsive_genes_angular_distance_test_res_df$cell_line <- rep("T98G",dim(T98G_upregulated_dose_responsive_genes_angular_distance_test_res_df)[1])
+U87MG_upregulated_dose_responsive_genes_angular_distance_test_res_df$cell_line <- rep("U87MG",dim(U87MG_upregulated_dose_responsive_genes_angular_distance_test_res_df)[1])
+
+joint_upregulated_dose_responsive_genes_angular_distance_test_res_df <- rbind(A172_upregulated_dose_responsive_genes_angular_distance_test_res_df,
+                                                                                T98G_upregulated_dose_responsive_genes_angular_distance_test_res_df,
+                                                                                U87MG_upregulated_dose_responsive_genes_angular_distance_test_res_df)
+
+joint_upregulated_dose_responsive_genes_angular_distance_test_res_df$q.value <- p.adjust(joint_upregulated_dose_responsive_genes_angular_distance_test_res_df$p.value, method = "BH")
+
+joint_S1_perturbing_kinases_interaction_all_hits <- joint_upregulated_dose_responsive_genes_angular_distance_test_res_df %>%
+  mutate(estimate = as.numeric(estimate)) %>%
+  filter(grepl(":gene_id",term), q.value < 0.05) %>%
+  pull(gene_id) %>%
+  unique() %>%
+  sort()
+
+joint_S1_perturbing_kinases_genotype_all_hits <- joint_upregulated_dose_responsive_genes_angular_distance_test_res_df %>%
+  mutate(estimate = as.numeric(estimate)) %>%
+  filter(!(grepl(":gene_id",term)),grepl("gene_id",term), q.value < 0.05) %>%
+  pull(gene_id) %>%
+  unique() %>%
+  sort()
+
+########################
+for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
+
+  A172_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- A172_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>% ungroup() %>% dplyr::select(test_res)
+  T98G_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- T98G_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>% ungroup() %>% dplyr::select(test_res)
+  U87MG_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <- U87MG_downregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] %>% ungroup() %>% dplyr::select(test_res)
+  
+}
+
+A172_downregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",A172_downregulated_dose_responsive_genes_angular_distance_test_res.list)
+T98G_downregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",T98G_downregulated_dose_responsive_genes_angular_distance_test_res.list)
+U87MG_downregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",U87MG_downregulated_dose_responsive_genes_angular_distance_test_res.list)
+
+A172_downregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",A172_downregulated_dose_responsive_genes_angular_distance_test_res_df$test_res)
+T98G_downregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",T98G_downregulated_dose_responsive_genes_angular_distance_test_res_df$test_res)
+U87MG_downregulated_dose_responsive_genes_angular_distance_test_res_df <- do.call("rbind",U87MG_downregulated_dose_responsive_genes_angular_distance_test_res_df$test_res)
+
+A172_downregulated_dose_responsive_genes_angular_distance_test_res_df$cell_line <- rep("A172",dim(A172_downregulated_dose_responsive_genes_angular_distance_test_res_df)[1])
+T98G_downregulated_dose_responsive_genes_angular_distance_test_res_df$cell_line <- rep("T98G",dim(T98G_downregulated_dose_responsive_genes_angular_distance_test_res_df)[1])
+U87MG_downregulated_dose_responsive_genes_angular_distance_test_res_df$cell_line <- rep("U87MG",dim(U87MG_downregulated_dose_responsive_genes_angular_distance_test_res_df)[1])
+
+joint_downregulated_dose_responsive_genes_angular_distance_test_res_df <- rbind(A172_downregulated_dose_responsive_genes_angular_distance_test_res_df,
+                                                                              T98G_downregulated_dose_responsive_genes_angular_distance_test_res_df,
+                                                                              U87MG_downregulated_dose_responsive_genes_angular_distance_test_res_df)
+
+joint_downregulated_dose_responsive_genes_angular_distance_test_res_df$q.value <- p.adjust(joint_downregulated_dose_responsive_genes_angular_distance_test_res_df$p.value, method = "BH")
+
+
+joint_S2_perturbing_kinases_interaction_all_hits <- joint_downregulated_dose_responsive_genes_angular_distance_test_res_df %>%
+  mutate(estimate = as.numeric(estimate)) %>%
+  filter(grepl(":gene_id",term), q.value < 0.05) %>%
+  pull(gene_id) %>%
+  unique() %>%
+  sort()
+
+joint_S2_perturbing_kinases_genotype_all_hits <- joint_downregulated_dose_responsive_genes_angular_distance_test_res_df %>%
+  mutate(estimate = as.numeric(estimate)) %>%
+  filter(!(grepl(":gene_id",term)),grepl("gene_id",term), q.value < 0.05) %>%
+  pull(gene_id) %>%
+  unique() %>%
+  sort()
+
+S1_distinct_hits <- joint_upregulated_dose_responsive_genes_angular_distance_test_res_df %>%
+  mutate(estimate = as.numeric(estimate)) %>%
+  filter(grepl(":gene_id",term), q.value < 0.05) %>%
+  dplyr::select(cell_line,gene_id) %>%
+  distinct()
+
+S2_distinct_hits <- joint_downregulated_dose_responsive_genes_angular_distance_test_res_df %>%
+  mutate(estimate = as.numeric(estimate)) %>%
+  filter(grepl(":gene_id",term), q.value < 0.05) %>%
+  dplyr::select(cell_line,gene_id) %>%
+  distinct()
+
+freq_hits_per_line <- rbind(S1_distinct_hits,S2_distinct_hits) %>%
+  filter(gene_id %in% intersect_perturbing_kinases) %>%
+  distinct() %>%
+  group_by(gene_id) %>%
+  mutate(instances_per_target = n()) %>%
+  dplyr::select(gene_id, instances_per_target) %>%
+  distinct() %>%
+  arrange(desc(instances_per_target))
+
+freq_hits_per_line <- freq_hits_per_line %>%
+  mutate(instances_per_target = ifelse(instances_per_target == 2, 20,5))
+
+dir.create("Transcriptome_distance")
+
+write.table(freq_hits_per_line,
+  "Transcriptome_distance/Interaction_freq_hits_per_line.txt",
+  row.names = F,
+  quote = F,
+  col.names = F,
+  sep = "\t"
+) 
+
+intersect_perturbing_kinases_genotype <- intersect(joint_S1_perturbing_kinases_genotype_all_hits,joint_S2_perturbing_kinases_genotype_all_hits) %>% 
+  sort()
+
+S1_genotype_hits <- joint_upregulated_dose_responsive_genes_angular_distance_test_res_df %>%
+  mutate(estimate = as.numeric(estimate)) %>%
+  filter(!(grepl(":gene_id",term)),grepl("gene_id",term), q.value < 0.05) %>%
+  dplyr::select(cell_line,gene_id) %>%
+  distinct()
+
+S2_genotype_hits <- joint_downregulated_dose_responsive_genes_angular_distance_test_res_df %>%
+  mutate(estimate = as.numeric(estimate)) %>%
+  filter(!(grepl(":gene_id",term)),grepl("gene_id",term), q.value < 0.05) %>%
+  dplyr::select(cell_line,gene_id) %>%
+  distinct()
+
+freq_genotype_hits_per_line <- rbind(S1_genotype_hits,S2_genotype_hits) %>%
+  #dplyr::select(cell_line,gene_id) %>%
+  filter(gene_id %in% intersect_perturbing_kinases_genotype) %>%
+  distinct() %>%
+  group_by(gene_id) %>%
+  mutate(instances_per_target = n()) %>%
+  dplyr::select(gene_id, instances_per_target) %>%
+  distinct() %>%
+  arrange(desc(instances_per_target))
+
+freq_genotype_hits_per_line <- freq_genotype_hits_per_line %>%
+  mutate(instances_per_target = ifelse(instances_per_target == 3, 20,ifelse(instances_per_target == 2,10,5)))
+
+write.table(freq_genotype_hits_per_line,
+  "Angular_distance/genotype_freq_hits_per_line.txt",
+  row.names = F,
+  quote = F,
+  col.names = F,
+  sep = "\t"
+) 
+
+intersect(intersect_perturbing_kinases_genotype,intersect_perturbing_kinases)
+
+write.table(intersect(intersect_perturbing_kinases_additive,intersect_perturbing_kinases),
+  "Angular_distance/intersect_genotype_interaction_hits.txt",
+  row.names = F,
+  quote = F,
+  col.names = F,
+  sep = "\t"
+) 
+
+png("Angular_distance/Overlap_genotype_signature_term_hits_Figure_5A.png", 
+    width = 3, height = 3, res = 1000, units = "in")
+VennDiagram::draw.pairwise.venn(length(joint_S1_perturbing_kinases_additive_all_hits),
+                                length(joint_S2_perturbing_kinases_additive_all_hits),
+                                length(intersect(joint_S1_perturbing_kinases_additive_all_hits,joint_S2_perturbing_kinases_additive_all_hits)),
+                                category = c("S1","S2"),
+                                fill = c('navy', 'brown4'),
+                                euler.d = TRUE,
+                                scaled = TRUE,
+                                cex = 2,
+                                cat.cex = 2,
+                                fontfamily = "Arial",
+                                cat.pos = 0)
+dev.off()
+
+png("Angular_distance/Overlap_interaction_signature_term_hits_Figure_5B.png", 
+    width = 3, height = 3, res = 1000, units = "in")
+VennDiagram::draw.pairwise.venn(length(joint_S1_perturbing_kinases_interaction_all_hits),
+                                length(joint_S2_perturbing_kinases_interaction_all_hits),
+                                length(intersect(joint_S1_perturbing_kinases_interaction_all_hits,joint_S2_perturbing_kinases_interaction_all_hits)),
+                                category = c("S1","S2"),
+                                fill = c('navy', 'brown4'),
+                                euler.d = TRUE,
+                                scaled = TRUE,
+                                cex = 2,
+                                cat.cex = 2,
+                                fontfamily = "Arial",
+                                cat.pos = 0)
+dev.off()
+
+png("Angular_distance/Overlap_S1_signature_term_hits_Figure_5C.png", 
+    width = 3, height = 3, res = 1000, units = "in")
+VennDiagram::draw.pairwise.venn(length(joint_S1_perturbing_kinases_additive_all_hits),
+                                length(joint_S1_perturbing_kinases_interaction_all_hits),
+                                length(intersect(joint_S1_perturbing_kinases_additive_all_hits,joint_S1_perturbing_kinases_interaction_all_hits)),
+                                category = c("G","GxE"),
+                                fill = c('firebrick2', 'darkorange2'),
+                                euler.d = TRUE,
+                                scaled = TRUE,
+                                cex = 2,
+                                cat.cex = 2,
+                                fontfamily = "Arial",
+                                cat.pos = 0)
+dev.off()
+
+png("Angular_distance/Overlap_S2_signature_term_hits_Figure_5D.png", 
+    width = 3, height = 3, res = 1000, units = "in")
+VennDiagram::draw.pairwise.venn(length(joint_S2_perturbing_kinases_additive_all_hits),
+                                length(joint_S2_perturbing_kinases_interaction_all_hits),
+                                length(intersect(joint_S2_perturbing_kinases_additive_all_hits,joint_S2_perturbing_kinases_interaction_all_hits)),
+                                category = c("G","GxE"),
+                                fill = c('firebrick2', 'darkorange2'),
+                                euler.d = TRUE,
+                                scaled = TRUE,
+                                cex = 2,
+                                cat.cex = 2,
+                                fontfamily = "Arial",
+                                cat.pos = 0)
+dev.off()
+
+### Figure 5E and 5F were generated using the Clear and customizable visualization of human kinome data (CORAL) (http://phanstiel-lab.med.unc.edu/CORAL/)
+### Specifically, values in the Interaction_freq_hits_per_line.txt and Genotype_freq_hits_per_line.txt files were used to
+### define size and color of kinase hit nodes.
