@@ -1,0 +1,1257 @@
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(furrr)
+library(piano)
+library(monocle3)
+
+# Set DelayedArray Parameters
+DelayedArray:::set_verbose_block_processing(TRUE)
+options(DelayedArray.block.size = 1000e7)
+options(stringsAsFactors = FALSE)
+
+### Define functions
+calculate_aggregate_expression_score <- function(cds, signature_genes, from_id = FALSE){
+
+  if(from_id == TRUE){
+    cds_subset = cds[rowData(cds)$id %in% signature_genes,]
+  }
+  else(cds_subset = cds[rowData(cds)$gene_short_name %in% signature_genes,])
+  aggregate_signature_expression = exprs(cds_subset)
+  aggregate_signature_expression = t(t(aggregate_signature_expression) / colData(cds_subset)$Size_Factor)
+  aggregate_signature_expression = Matrix::colSums(aggregate_signature_expression)
+  aggregate_signature_expression = log(aggregate_signature_expression+1)
+  return(aggregate_signature_expression)
+}
+
+#################################################################################
+
+### Load in data from notebook 1 cleanup
+cds.list <- readRDS("GSM7056151_sciPlex_4_preprocessed_cds.list.rds")
+
+for(cell_type in names(cds.list)){
+
+  colData(cds.list[[cell_type]])$dose_character <- as.character(colData(cds.list[[cell_type]])$dose)
+
+}
+
+### Load information on conserved gene modules
+Jaccard_collapsed_clusters <- readRDS("Jaccard_collapsed_up_and_down_regulated_clusters_cutree.rds")
+
+upregulated_dose_responsive_genes <- Jaccard_collapsed_clusters %>%
+  filter(super_cluster_id == "upregulated_super_cluster_1") %>%
+  pull(id)
+
+downregulated_dose_responsive_genes <- Jaccard_collapsed_clusters %>%
+  filter(super_cluster_id == "downregulated_super_cluster_2") %>%
+  pull(id)
+
+### Single exposure analysis
+# Load DEG test results from notebook 2, join and correct for multiple testing
+single_exposure_deg_test_res.list <- list()
+
+single_exposure_deg_test_res.list[["A172"]] <- readRDS("A172_signature_single_drug_deg_test_res.rds")
+single_exposure_deg_test_res.list[["T98G"]] <- readRDS("T98G_signature_single_drug_deg_test_res.rds")
+single_exposure_deg_test_res.list[["U87MG"]] <- readRDS("U87MG_signature_single_drug_deg_test_res.rds")
+
+for(cell_type in names(cds.list)){
+
+  for(drug in single_exposure_deg_test_res.list[[cell_type]]$treatment){
+
+    single_exposure_deg_test_res.list[[cell_type]][single_exposure_deg_test_res.list[[cell_type]]$treatment == drug,]$test_res[[1]]$treatment <- rep(drug,dim(single_exposure_deg_test_res.list[[cell_type]][single_exposure_deg_test_res.list[[cell_type]]$treatment == drug,]$test_res[[1]])[1])
+  }
+
+}
+
+for(cell_type in names(cds.list)){
+
+  single_exposure_deg_test_res.list[[cell_type]] <- single_exposure_deg_test_res.list[[cell_type]] %>% ungroup() %>% dplyr::select(test_res)
+  single_exposure_deg_test_res.list[[cell_type]] <- single_exposure_deg_test_res.list[[cell_type]]$test_res
+  single_exposure_deg_test_res.list[[cell_type]] <- do.call("rbind",single_exposure_deg_test_res.list[[cell_type]])
+}
+
+for(cell_type in names(cds.list)){
+
+  single_exposure_deg_test_res.list[[cell_type]]$cell_type <- rep(cell_type, dim(single_exposure_deg_test_res.list[[cell_type]])[1])
+}
+
+single_exposure_deg_test_res <- do.call("rbind",single_exposure_deg_test_res.list)
+single_exposure_deg_test_res$q_value <- p.adjust(single_exposure_deg_test_res$p_value, method = "BH")
+
+single_exposure_drug_dependent_degs <- single_exposure_deg_test_res %>% 
+  filter(grepl("dose", term), q_value < 0.05, abs(normalized_effect) > 0.05) %>% 
+  pull(id) %>%
+  unique()
+
+beta_coef_heatmap_matrix.list <- list()
+
+for(cell_line in names(cds.list)){
+
+  beta_coef_heatmap_matrix.list[[cell_line]] <- single_exposure_deg_test_res %>%
+  filter(grepl("dose", term), cell_type == cell_line, id %in% single_exposure_drug_dependent_degs) %>%
+  dplyr::select(treatment, id, normalized_effect) %>%
+  tidyr::spread(key = treatment, value = normalized_effect) %>%
+  as.data.frame()
+
+  row.names(beta_coef_heatmap_matrix.list[[cell_line]]) <- beta_coef_heatmap_matrix.list[[cell_line]]$id
+  beta_coef_heatmap_matrix.list[[cell_line]]$id <- NULL
+
+  beta_coef_heatmap_matrix.list[[cell_line]] <- scale(t(scale(t(beta_coef_heatmap_matrix.list[[cell_line]]))))
+  beta_coef_heatmap_matrix.list[[cell_line]][beta_coef_heatmap_matrix.list[[cell_line]] > 3] <- 3
+  beta_coef_heatmap_matrix.list[[cell_line]][beta_coef_heatmap_matrix.list[[cell_line]] < -3] <- -3
+
+}
+
+cor_matrix.list <- list()
+cor_matrix_heatmap.list <- list()
+cor_test_results.list <- list()
+
+for(cell_type in names(cds.list)){
+
+  cor_matrix.list[[cell_type]] <- cor(as.matrix(beta_coef_heatmap_matrix.list[[cell_type]]), method = "pearson")
+  cor_matrix_heatmap.list[[cell_type]] <- cor(as.matrix(beta_coef_heatmap_matrix.list[[cell_type]]), method = "pearson")
+  cor_matrix_heatmap.list[[cell_type]][cor_matrix_heatmap.list[[cell_type]] == 1] <- NA
+  cor_test_results.list[[cell_type]] <- psych::corr.test(as.matrix(beta_coef_heatmap_matrix.list[[cell_type]]), method = "pearson")
+  colnames(cor_matrix.list[[cell_type]]) <- paste0(cell_type,"_",colnames(cor_matrix.list[[cell_type]]))
+  print(head(colnames(cor_matrix.list[[cell_type]])))
+
+}
+
+cor_matrix_heatmap_A172 <- cor_matrix_heatmap.list[["A172"]][!(row.names(cor_matrix_heatmap.list[["A172"]]) %in% c("DDR1IN","Alectinib","VE821","RIPA56","BID1870","Salubrinal")),
+                                                     !(colnames(cor_matrix_heatmap.list[["A172"]]) %in% c("DDR1IN","Alectinib","VE821","RIPA56","BID1870","Salubrinal"))]
+
+cor_matrix_heatmap_T98G <- cor_matrix_heatmap.list[["T98G"]][!(row.names(cor_matrix_heatmap.list[["T98G"]]) %in% c("DDR1IN","Alectinib","VE821","RIPA56","BID1870","Salubrinal")),
+                                                     !(colnames(cor_matrix_heatmap.list[["T98G"]]) %in% c("DDR1IN","Alectinib","VE821","RIPA56","BID1870","Salubrinal"))]
+
+cor_matrix_heatmap_U87MG <- cor_matrix_heatmap.list[["U87MG"]][!(row.names(cor_matrix_heatmap.list[["U87MG"]]) %in% c("DDR1IN","Alectinib","VE821","RIPA56","BID1870","Salubrinal")),
+                                                     !(colnames(cor_matrix_heatmap.list[["U87MG"]]) %in% c("DDR1IN","Alectinib","VE821","RIPA56","BID1870","Salubrinal"))]
+
+# View the correlation structure using heatmaps
+paletteLength <- 35
+hmcols<-colorRampPalette(c("navy","white","firebrick2"))(paletteLength)
+
+A172_ph_cor_matrix_breaks <- c(seq(min(cor_matrix_heatmap_A172[!is.na(cor_matrix_heatmap_A172)]), 0, length.out=ceiling(paletteLength/2) + 1), 
+                                 seq(max(cor_matrix_heatmap_A172[!is.na(cor_matrix_heatmap_A172)])/paletteLength, max(cor_matrix_heatmap_A172[!is.na(cor_matrix_heatmap_A172)]), length.out=floor(paletteLength/2)))
+
+
+pheatmap::pheatmap(cor_matrix_heatmap_A172,
+                   clustering_method = "ward.D2",
+                   color = hmcols,
+                   breaks = A172_ph_cor_matrix_breaks,
+                   file = "DEG_testing/A172_single_exposure_cor_heatmap.png",
+                   scale = "none")
+
+T98G_ph_cor_matrix_breaks <- c(seq(min(cor_matrix_heatmap_T98G[!is.na(cor_matrix_heatmap_T98G)]), 0, length.out=ceiling(paletteLength/2) + 1), 
+                                 seq(max(cor_matrix_heatmap_T98G[!is.na(cor_matrix_heatmap_T98G)])/paletteLength, max(cor_matrix_heatmap_T98G[!is.na(cor_matrix_heatmap_T98G)]), length.out=floor(paletteLength/2)))
+
+pheatmap::pheatmap(cor_matrix_heatmap_T98G,
+                   clustering_method = "ward.D2",
+                   color = hmcols,
+                   breaks = T98G_ph_cor_matrix_breaks,
+                   file = "DEG_testing/T98G_single_exposure_cor_heatmap.png",
+                   scale = "none")
+
+U87MG_ph_cor_matrix_breaks <- c(seq(min(cor_matrix_heatmap_U87MG[!is.na(cor_matrix_heatmap_U87MG)]), 0, length.out=ceiling(paletteLength/2) + 1), 
+                                 seq(max(cor_matrix_heatmap_U87MG[!is.na(cor_matrix_heatmap_U87MG)])/paletteLength, max(cor_matrix_heatmap_U87MG[!is.na(cor_matrix_heatmap_U87MG)]), length.out=floor(paletteLength/2)))
+
+pheatmap::pheatmap(cor_matrix_heatmap_U87MG,
+                   clustering_method = "ward.D2",
+                   color = hmcols,
+                   breaks = U87MG_ph_cor_matrix_breaks,
+                   file = "DEG_testing/U87MG_single_exposure_cor_heatmap.png",
+                   scale = "none")
+
+### Summarize the correlation structure across all single treatments and cell lines using UMAP
+cor_matrix <- do.call("cbind",cor_matrix.list)
+
+cor_matrix_colData <- data.frame(row.names = colnames(cor_matrix), cell = colnames(cor_matrix))
+cor_matrix_colData$cell_line <- sapply(row.names(cor_matrix_colData),function(x){stringr::str_split(x, pattern = "_")[[1]][1]})
+cor_matrix_colData$treatment <- sapply(row.names(cor_matrix_colData),function(x){stringr::str_split(x, pattern = "_")[[1]][2]})
+
+trametinib_cor_annotation <- data.frame(row.names = c(names(cor_matrix.list[["A172"]]["Trametinib",]),
+                                                      names(cor_matrix.list[["T98G"]]["Trametinib",]),
+                                                      names(cor_matrix.list[["U87MG"]]["Trametinib",])),
+                                        cell = c(names(cor_matrix.list[["A172"]]["Trametinib",]),
+                                                 names(cor_matrix.list[["T98G"]]["Trametinib",]),
+                                                 names(cor_matrix.list[["U87MG"]]["Trametinib",])),
+                                        Trametinib_correlation = c(cor_matrix.list[["A172"]]["Trametinib",],
+                                                                   cor_matrix.list[["T98G"]]["Trametinib",],
+                                                                   cor_matrix.list[["U87MG"]]["Trametinib",]))
+
+trametinib_cor_annotation <- trametinib_cor_annotation %>%
+  dplyr::mutate(Trametinib_correlation = ifelse(grepl("Trametinib", cell), NA, Trametinib_correlation))
+
+cor_matrix_colData <- left_join(cor_matrix_colData,trametinib_cor_annotation,by = "cell")
+
+colData_all_lines_df <- rbind(colData(cds.list[["A172"]]), colData(cds.list[["T98G"]]), colData(cds.list[["U87MG"]]))
+row.names(cor_matrix_colData) <- cor_matrix_colData$cell
+cor_matrix_colData <- cor_matrix_colData[colnames(cor_matrix),]
+identical(row.names(cor_matrix_colData), colnames(cor_matrix))
+
+single_exposure_deg_test_res %>% 
+  filter(grepl("dose", term), q_value < 0.05, abs(normalized_effect) > 0.05) %>% 
+  group_by(treatment) %>%
+  summarize(n = n()) %>%
+  arrange(n) %>%
+  print(n = 23)
+
+cor_matrix_rowData <- data.frame(row.names = row.names(cor_matrix), id = row.names(cor_matrix), gene_short_name = row.names(cor_matrix))
+
+cor_matrix_cds <- new_cell_data_set(cor_matrix, cell_metadata = cor_matrix_colData, gene_metadata = cor_matrix_rowData)
+
+# Filter 6 compounds that have no discernible effect on gene expression as single exposures
+cor_matrix_cds <- cor_matrix_cds[,!(cor_matrix_cds$treatment %in% c("DDR1IN",
+                                                                    "Salubrinal",
+                                                                    "VE821",
+                                                                    "Alectinib",
+                                                                    "BID1870",
+                                                                    "RIPA56"))]
+
+reducedDims(cor_matrix_cds)[["PCA"]] <- t(exprs(cor_matrix_cds))
+
+cor_matrix_cds <- align_cds(cor_matrix_cds, 
+                            residual_model_formula_str = "~cell_line", 
+                            verbose = TRUE)
+
+cor_matrix_cds <- reduce_dimension(cor_matrix_cds,
+                                   max_components = 2,
+                                   preprocess_method = "Aligned",
+                                   reduction_method = "UMAP",
+                                   umap.metric = "cosine",
+                                   umap.n_neighbors = 5,
+                                   umap.min_dist = 0.15,#0.2
+                                   umap.fast_sgd = FALSE,
+                                   cores = 1,
+                                   verbose = T)
+
+colData(cor_matrix_cds)$UMAP1 <- reducedDims(cor_matrix_cds)[["UMAP"]][,1]
+colData(cor_matrix_cds)$UMAP2 <- reducedDims(cor_matrix_cds)[["UMAP"]][,2]
+
+cor_matrix_cds <- cluster_cells(cor_matrix_cds, 
+                                resolution = 0.75,
+                                reduction_method = "Aligned")
+
+colData(cor_matrix_cds)$Cluster <- clusters(cor_matrix_cds, reduction_method = "Aligned")
+length(unique(colData(cor_matrix_cds)$Cluster))
+
+colData(cor_matrix_cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, color = treatment, shape = factor(cell_line, levels = c("U87MG","T98G","A172"))), size = 5, stroke = 0.2) +
+  scale_color_manual("Treatment", 
+    values = c("AZ628" = "brown4", 
+      "AZD7762" =  "darkgoldenrod3", 
+      "BMS345541" = "darkorange2",
+      "Doxorubicin" = "lawngreen",
+      "GSK690693" = "darkorange3",
+      "Infigratinib" = "darkviolet",
+      "KU55933" = "blue",
+      "MK2206" = "darkorange1",
+      "Nintedanib" = "deeppink2",
+      "Nutlin3A" = "black",
+      "Palbociclib" = "magenta",
+      "PHA767491" = "orchid4",
+      "Roscovitine" = "red",
+      "Temozolomide" = "darkolivegreen",
+      "Temsirolimus" = "darkorange4",
+      "Trametinib" = "firebrick1",
+      "Volasertib" = "navy")) +
+  scale_shape_manual("Cell line", values=c(16, 15, 17)) +
+  monocle3:::monocle_theme_opts() +
+  theme(legend.position = "right",
+        text = element_text(size = 9),
+        legend.key.width = unit(0.1,"line"),
+        legend.key.height = unit(0.1,"line")) +
+  guides(guides(colour = guide_legend(override.aes = list(size=2))))
+ggsave("UMAPs/Covariance_UMAP_by_treatment_Supplementary_Figure_8B.png", dpi = 600, height = 2.9, width = 3.9)
+
+# Inspect the relationship between correlations to the response induced by trametinib and treatment grouping
+colData(cor_matrix_cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, fill = Trametinib_correlation, shape = cell_line), size = 3, stroke = 0.3, color = "black") +
+  scale_shape_manual("Cell line", values = c("A172" = 21, "T98G" = 22, "U87MG" = 24)) +
+  scale_fill_gradient2("Correlation to\ntrametinib\nresponse", 
+                       na.value = "grey70", 
+                       low = "blue",
+                       mid = "white",
+                       high = "red") +
+  monocle3:::monocle_theme_opts() +
+  theme_void() +
+  theme(legend.position = "right",
+        text = element_text(size = 6),
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"))
+ggsave("UMAPs/Covariance_UMAP_by_trametinib_correlation_Supplementary_Figure_8C.png", dpi = 600, height = 1.5, width = 2)
+
+colData(cor_matrix_cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, fill = Cluster, shape = cell_line), size = 3, stroke = 0.3, color = "black") +
+  scale_shape_manual("Cell line", values = c("A172" = 21, "T98G" = 22, "U87MG" = 24)) +
+  scale_fill_manual("Cluster", values = c("1" = "navy", "2" = "brown4", "3" = "darkolivegreen", "4" = "darkcyan")) +
+  monocle3:::monocle_theme_opts() +
+  theme_void() +
+  theme(legend.position = "right",
+        text = element_text(size = 6),
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line")) +
+  guides(guides(fill = guide_legend(override.aes = list(size=2)))) + 
+  guides(guides(color = guide_legend(override.aes = list(size=2)))) 
+ggsave("UMAPs/Covariance_UMAP_by_cluster_Supplementary_Figure_8D.png", dpi = 600, height = 1.5, width = 2)
+
+# Filter for significant correlations to the response induced by trametinib
+cor_test_pvalues.list <- list()
+
+for(cell_type in names(cor_test_results.list)){
+
+  cor_test_pvalues.list[[cell_type]] <- cor_test_results.list[[cell_type]]$p
+  cor_test_pvalues.list[[cell_type]] <- cor_test_pvalues.list[[cell_type]] < 0.05
+  cor_test_pvalues.list[[cell_type]] <- as.data.frame(cor_test_pvalues.list[[cell_type]])
+  cor_test_pvalues.list[[cell_type]]$cell_line <- rep(cell_type, nrow(cor_test_pvalues.list[[cell_type]]))
+  cor_test_pvalues.list[[cell_type]]$treatment <- row.names(cor_test_pvalues.list[[cell_type]])
+}
+
+cor_test_pvalues <- do.call("rbind",cor_test_pvalues.list)
+
+trametinib_cor_test_pvalues <- cor_test_pvalues %>%
+  dplyr::mutate(treatment_id = paste0(cell_line,"_",treatment)) %>%
+  dplyr::select(Trametinib,treatment_id)
+
+row.names(trametinib_cor_test_pvalues) <- NULL
+
+trametinib_cor_heatmap_subset <- colData(cor_matrix_cds) %>%
+  as.data.frame() %>%
+  dplyr::select(cell_line, treatment, Trametinib_correlation) %>%
+  dplyr::mutate(treatment_id = paste0(cell_line,"_",treatment))
+
+trametinib_cor_heatmap_subset <- left_join(trametinib_cor_heatmap_subset,trametinib_cor_test_pvalues,by="treatment_id")
+trametinib_cor_heatmap_subset <- trametinib_cor_heatmap_subset %>%
+  mutate(Trametinib_correlation = ifelse(Trametinib == FALSE,0,Trametinib_correlation),
+         Trametinib_correlation = ifelse(abs(Trametinib_correlation) < 0.2,0,Trametinib_correlation))
+
+trametinib_cor_heatmap_subset <-  trametinib_cor_heatmap_subset %>%
+  filter(!(treatment %in% c("Trametinib"))) %>%
+  dplyr::select(cell_line, treatment, Trametinib_correlation) %>%
+  tidyr::spread(key = cell_line, value = Trametinib_correlation) %>%
+  as.data.frame()
+
+row.names(trametinib_cor_heatmap_subset) <- trametinib_cor_heatmap_subset$treatment
+trametinib_cor_heatmap_subset$treatment <- NULL
+
+png("UMAPs/Single_exposure_trametinib_correlation_circos_plot_Figure_6A.png", res = 600, pointsize = 9, units = "in", width = 2, height = 2)
+circlize::circos.heatmap(trametinib_cor_heatmap_subset %>% as.matrix(), 
+                         col = circlize::colorRamp2(c(min(trametinib_cor_heatmap_subset), 0, max(trametinib_cor_heatmap_subset)), c("blue", "white", "red")), 
+                         dend.side = "inside",
+                         rownames.side = "outside",
+         dend.track.height = 0.2)
+circlize::circos.clear()
+dev.off()
+
+write.table(colData(cor_matrix_cds) %>%
+  as.data.frame() %>%
+  dplyr::select(cell_line, treatment, Cluster,Trametinib_correlation) %>%
+  distinct() %>%
+  arrange(Cluster), "Single_exposure_response_groups.txt", sep = "\t", quote = FALSE, row.names = TRUE)
+
+### Generate ridge plots of the effect of select compounds that significantly phenpcopy or have the opposite effects on
+### gene module expression compared to trametinib 
+
+############
+### A172 ###
+############
+
+ggplot(colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(is.finite(upregulated_super_cluster_score)) %>%
+        filter((trametinib_dose == 0 & treatment == "vehicle") | (trametinib_dose != 0 & treatment == c("Trametinib"))), 
+       aes(x = upregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  geom_vline(xintercept = colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+        pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Trametinib]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+ggsave("Signature_scores/Upregulated_signature_scores_MEKi_A172_Supplementary_Figure_8A_top_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(is.finite(downregulated_super_cluster_score)) %>%
+        filter((trametinib_dose == 0 & treatment == "vehicle") | (trametinib_dose != 0 & treatment == c("Trametinib"))), 
+       aes(x = downregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  geom_vline(xintercept = colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+        pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis") +
+  ylab("[Trametinib]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+ggsave("Signature_scores/Downregulated_signature_scores_MEKi_A172_Supplementary_Figure_8A_top_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle","Palbociclib"), is.finite(upregulated_super_cluster_score)), 
+       aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+        pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Palbociclib]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+ggsave("Signature_scores/Upregulated_signature_scores_CDK4-6i_A172_Supplementary_Figure_8A_top_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle","Palbociclib"), is.finite(downregulated_super_cluster_score)), 
+       aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+        pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis") +
+  ylab("[Palbociclib]\n(µM)") +
+  xlab("Downregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+ggsave("Signature_scores/Downregulated_signature_scores_CDK4-6i_A172_Supplementary_Figure_8A_top_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle","PHA767491"), is.finite(upregulated_super_cluster_score), dose < 10), 
+       aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+        pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[PHA767491]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+ggsave("Signature_scores/Upregulated_signature_scores_CDC7i_A172_Supplementary_Figure_8A_top_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle","PHA767491"), is.finite(downregulated_super_cluster_score), dose < 10), 
+       aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["A172"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+        pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis") +
+  ylab("[PHA767491]\n(µM)") +
+  xlab("Downregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+ggsave("Signature_scores/Downregulated_signature_scores_CDC7i_A172_Supplementary_Figure_8A_top_panel.png", width = 1, height = 1, dpi = 600)
+
+############
+### T98G ###
+############
+# Note: The following panels for T98G in Figure 6B are also found in the middle plnel of Supplementary Figure 8A for cell line comparisons.
+
+ggplot(colData(cds.list[["T98G"]]) %>%
+        as.data.frame() %>%
+        filter(is.finite(upregulated_super_cluster_score)) %>%
+        filter((trametinib_dose == 0 & treatment == "vehicle") | (trametinib_dose != 0 & treatment == c("Trametinib"))), 
+       aes(x = upregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  geom_vline(xintercept = colData(cds.list[["T98G"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+        pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Trametinib]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4))
+ggsave("Signature_scores/Upregulated_signature_scores_MEKi_T98G_Figure_6B_left_panel_1.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["T98G"]]) %>%
+        as.data.frame() %>%
+        filter(is.finite(downregulated_super_cluster_score)) %>%
+        filter((trametinib_dose == 0 & treatment == "vehicle") | (trametinib_dose != 0 & treatment == c("Trametinib"))), 
+       aes(x = downregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  geom_vline(xintercept = colData(cds.list[["T98G"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+        pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  ylab("[Trametinib]\n(µM)") +
+  xlab("Downregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4))
+ggsave("Signature_scores/Downregulated_signature_scores_MEKi_T98G_Figure_6B_left_panel_2.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["T98G"]]) %>%
+         as.data.frame() %>%
+         filter(trametinib_dose == 0, treatment %in% c("vehicle","Palbociclib"), is.finite(upregulated_super_cluster_score)), 
+       aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["T98G"]]) %>%
+               as.data.frame() %>%
+               filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+               pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Palbociclib]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4))
+  ggsave("Signature_scores/Upregulated_signature_scores_CDK4-6i_T98G_Figure_6B_middle_panel_1.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["T98G"]]) %>%
+         as.data.frame() %>%
+         filter(trametinib_dose == 0, treatment %in% c("vehicle","Palbociclib"), is.finite(downregulated_super_cluster_score)), 
+       aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["T98G"]]) %>%
+               as.data.frame() %>%
+               filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+               pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  ylab("[Palbociclib]\n(µM)") +
+  xlab("Downregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4))
+  ggsave("Signature_scores/Downregulated_signature_scores_CDK4-6i_T98G_Figure_6B_middle_panel_2.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["T98G"]]) %>%
+         as.data.frame() %>%
+         filter(trametinib_dose == 0, treatment %in% c("vehicle","PHA767491"), is.finite(upregulated_super_cluster_score)), 
+       aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["T98G"]]) %>%
+               as.data.frame() %>%
+               filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+               pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[PHA767491]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) 
+  ggsave("Signature_scores/Upregulated_signature_scores_CDC7i_T98G_Figure_6B_right_panel_1.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["T98G"]]) %>%
+         as.data.frame() %>%
+         filter(trametinib_dose == 0, treatment %in% c("vehicle","PHA767491"), is.finite(downregulated_super_cluster_score)), 
+       aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["T98G"]]) %>%
+               as.data.frame() %>%
+               filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+               pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  ylab("[PHA767491]\n(µM)") +
+  xlab("Downregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) 
+  ggsave("Signature_scores/Downregulated_signature_scores_CDC7i_T98G_Figure_6B_right_panel_2.png", width = 1, height = 1, dpi = 600)
+
+#############
+### U87MG ###
+#############
+
+ggplot(colData(cds.list[["U87MG"]]) %>%
+        as.data.frame() %>%
+        filter(is.finite(upregulated_super_cluster_score)) %>%
+        filter((trametinib_dose == 0 & treatment == "vehicle") | (trametinib_dose != 0 & treatment == c("Trametinib"))), 
+       aes(x = upregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  geom_vline(xintercept = colData(cds.list[["U87MG"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+        pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Trametinib]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+ggsave("Signature_scores/Upregulated_signature_scores_MEKi_U87MG_Supplementary_Figure_8A_bottom_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["U87MG"]]) %>%
+        as.data.frame() %>%
+        filter(is.finite(downregulated_super_cluster_score)) %>%
+        filter((trametinib_dose == 0 & treatment == "vehicle") | (trametinib_dose != 0 & treatment == c("Trametinib"))), 
+       aes(x = downregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = as.character(trametinib_dose), fill = as.character(trametinib_dose))) +
+  geom_vline(xintercept = colData(cds.list[["U87MG"]]) %>%
+        as.data.frame() %>%
+        filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+        pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis") +
+  ylab("[Trametinib]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+          legend.position = "none",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(0.5,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+ggsave("Signature_scores/Downregulated_signature_scores_MEKi_U87MG_Supplementary_Figure_8A_bottom_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["U87MG"]]) %>%
+         as.data.frame() %>%
+         filter(trametinib_dose == 0, treatment %in% c("vehicle","Palbociclib"), is.finite(upregulated_super_cluster_score)), 
+       aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["U87MG"]]) %>%
+               as.data.frame() %>%
+               filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+               pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Palbociclib]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  ggsave("Signature_scores/Upregulated_signature_scores_CDK4-6i_U87MG_Supplementary_Figure_8A_bottom_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["U87MG"]]) %>%
+         as.data.frame() %>%
+         filter(trametinib_dose == 0, treatment %in% c("vehicle","Palbociclib"), is.finite(downregulated_super_cluster_score)), 
+       aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["U87MG"]]) %>%
+               as.data.frame() %>%
+               filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+               pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis") +
+  ylab("[Palbociclib]\n(µM)") +
+  xlab("Downregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  ggsave("Signature_scores/Downregulated_signature_scores_CDK4-6i_U87MG_Supplementary_Figure_8A_bottom_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["U87MG"]]) %>%
+         as.data.frame() %>%
+         filter(trametinib_dose == 0, treatment %in% c("vehicle","PHA767491"), is.finite(upregulated_super_cluster_score), dose < 10), 
+       aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["U87MG"]]) %>%
+               as.data.frame() %>%
+               filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(upregulated_super_cluster_score)) %>%
+               pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[PHA767491]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  ggsave("Signature_scores/Upregulated_signature_scores_CDC7i_U87MG_Supplementary_Figure_8A_bottom_panel.png", width = 1, height = 1, dpi = 600)
+
+ggplot(colData(cds.list[["U87MG"]]) %>%
+         as.data.frame() %>%
+         filter(trametinib_dose == 0, treatment %in% c("vehicle","PHA767491"), is.finite(downregulated_super_cluster_score), dose < 10), 
+       aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = downregulated_super_cluster_score, y = dose_character, fill = dose_character)) +
+  geom_vline(xintercept = colData(cds.list[["U87MG"]]) %>%
+               as.data.frame() %>%
+               filter(trametinib_dose == 0, treatment %in% c("vehicle"), is.finite(downregulated_super_cluster_score)) %>%
+               pull(downregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "viridis") +
+  ylab("[PHA767491]\n(µM)") +
+  xlab("Downregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  ggsave("Signature_scores/Downregulated_signature_scores_CDC7i_U87MG_Supplementary_Figure_8A_bottom_panel.png", width = 1, height = 1, dpi = 600)
+
+### Combinatorial exposure analysis
+# Load DEG test results from notebook 2, join and correct for multiple testing
+co_exposure_deg_test_res.list <- list()
+
+co_exposure_deg_test_res.list[["A172"]] <- readRDS("A172_signature_co_exposure_drug_deg_test_res.rds")
+co_exposure_deg_test_res.list[["T98G"]] <- readRDS("T98G_signature_co_exposure_drug_deg_test_res.rds")
+co_exposure_deg_test_res.list[["U87MG"]] <- readRDS("U87MG_signature_co_exposure_drug_deg_test_res.rds")
+
+for(cell_type in names(cds.list)){
+
+  for(drug in co_exposure_deg_test_res.list[[cell_type]]$treatment){
+
+    co_exposure_deg_test_res.list[[cell_type]][co_exposure_deg_test_res.list[[cell_type]]$treatment == drug,]$test_res[[1]]$treatment <- rep(drug,dim(co_exposure_deg_test_res.list[[cell_type]][co_exposure_deg_test_res.list[[cell_type]]$treatment == drug,]$test_res[[1]])[1])
+  }
+
+}
+
+for(cell_type in names(cds.list)){
+
+  co_exposure_deg_test_res.list[[cell_type]] <- co_exposure_deg_test_res.list[[cell_type]] %>% ungroup() %>% dplyr::select(test_res)
+  co_exposure_deg_test_res.list[[cell_type]] <- co_exposure_deg_test_res.list[[cell_type]]$test_res
+  co_exposure_deg_test_res.list[[cell_type]] <- do.call("rbind",co_exposure_deg_test_res.list[[cell_type]])
+}
+
+for(cell_type in names(cds.list)){
+
+  co_exposure_deg_test_res.list[[cell_type]]$cell_type <- rep(cell_type, dim(co_exposure_deg_test_res.list[[cell_type]])[1])
+}
+
+co_exposure_deg_test_res <- do.call("rbind",co_exposure_deg_test_res.list)
+co_exposure_deg_test_res$q_value <- p.adjust(co_exposure_deg_test_res$p_value, method = "BH")
+
+co_exposure_drug_dependent_degs <- co_exposure_deg_test_res %>% 
+  filter(grepl("dose", term), q_value < 0.05, abs(normalized_effect) > 0.05) %>% 
+  pull(id) %>%
+  unique()
+
+co_exposure_beta_coef_heatmap_matrix.list <- list()
+
+for(cell_line in names(cds.list)){
+
+  co_exposure_beta_coef_heatmap_matrix.list[[cell_line]] <- co_exposure_deg_test_res %>%
+  filter(grepl("dose", term), cell_type == cell_line, id %in% co_exposure_drug_dependent_degs) %>%
+  #mutate(genotype_treatment = paste0(cell_type,"_",treatment)) %>%
+  dplyr::select(treatment, id, normalized_effect) %>%
+  tidyr::spread(key = treatment, value = normalized_effect) %>%
+  as.data.frame()
+
+  row.names(co_exposure_beta_coef_heatmap_matrix.list[[cell_line]]) <- co_exposure_beta_coef_heatmap_matrix.list[[cell_line]]$id
+  co_exposure_beta_coef_heatmap_matrix.list[[cell_line]]$id <- NULL
+
+  co_exposure_beta_coef_heatmap_matrix.list[[cell_line]] <- scale(t(scale(t(co_exposure_beta_coef_heatmap_matrix.list[[cell_line]]))))
+  co_exposure_beta_coef_heatmap_matrix.list[[cell_line]][co_exposure_beta_coef_heatmap_matrix.list[[cell_line]] > 3] <- 3
+  co_exposure_beta_coef_heatmap_matrix.list[[cell_line]][co_exposure_beta_coef_heatmap_matrix.list[[cell_line]] < -3] <- -3
+  co_exposure_beta_coef_heatmap_matrix.list[[cell_line]][is.na(co_exposure_beta_coef_heatmap_matrix.list[[cell_line]])] <- 0
+
+}
+
+
+co_exposure_cor_matrix.list <- list()
+
+for(cell_type in names(cds.list)){
+
+  co_exposure_cor_matrix.list[[cell_type]] <- cor(as.matrix(co_exposure_beta_coef_heatmap_matrix.list[[cell_type]]), method = "pearson")
+  #cor_matrix.list[[cell_type]] <- cor_matrix.list[[cell_type]][!(grepl("Doxorubicin_1",row.names(cor_matrix.list[[cell_type]])) | grepl("AZD7762_10",row.names(cor_matrix.list[[cell_type]]))),!(grepl("Doxorubicin_1",row.names(cor_matrix.list[[cell_type]])) | grepl("AZD7762_10",row.names(cor_matrix.list[[cell_type]])))]
+  colnames(co_exposure_cor_matrix.list[[cell_type]]) <- paste0(cell_type,"_",colnames(co_exposure_cor_matrix.list[[cell_type]]))
+  print(head(colnames(co_exposure_cor_matrix.list[[cell_type]])))
+
+}
+
+co_exposure_cor_matrix <- do.call("cbind",co_exposure_cor_matrix.list)
+
+co_exposure_cor_matrix_colData <- data.frame(row.names = colnames(co_exposure_cor_matrix), cell = colnames(co_exposure_cor_matrix))
+co_exposure_cor_matrix_colData$cell_line <- sapply(row.names(co_exposure_cor_matrix_colData),function(x){stringr::str_split(x, pattern = "_")[[1]][1]})
+co_exposure_cor_matrix_colData$treatment <- sapply(row.names(co_exposure_cor_matrix_colData),function(x){stringr::str_split(x, pattern = "_")[[1]][2]})
+
+co_exposure_trametinib_cor_annotation <- data.frame(row.names = c(names(co_exposure_cor_matrix.list[["A172"]]["Trametinib",]),
+                                                      names(co_exposure_cor_matrix.list[["T98G"]]["Trametinib",]),
+                                                      names(co_exposure_cor_matrix.list[["U87MG"]]["Trametinib",])),
+                                        cell = c(names(co_exposure_cor_matrix.list[["A172"]]["Trametinib",]),
+                                                 names(co_exposure_cor_matrix.list[["T98G"]]["Trametinib",]),
+                                                 names(co_exposure_cor_matrix.list[["U87MG"]]["Trametinib",])),
+                                        Trametinib_correlation = c(co_exposure_cor_matrix.list[["A172"]]["Trametinib",],
+                                                                   co_exposure_cor_matrix.list[["T98G"]]["Trametinib",],
+                                                                   co_exposure_cor_matrix.list[["U87MG"]]["Trametinib",]))
+
+co_exposure_trametinib_cor_annotation <- co_exposure_trametinib_cor_annotation %>%
+  dplyr::mutate(Trametinib_correlation = ifelse(grepl("Trametinib", cell), NA, Trametinib_correlation))
+
+co_exposure_cor_matrix_colData <- left_join(co_exposure_cor_matrix_colData,co_exposure_trametinib_cor_annotation,by = "cell")
+colData_all_lines_df <- rbind(colData(cds.list[["A172"]]), colData(cds.list[["T98G"]]), colData(cds.list[["U87MG"]]))
+colData_all_lines_df <- colData_all_lines_df %>%
+  as.data.frame() %>%
+  filter(trametinib_dose != 0, dose == 1) %>%
+  group_by(cell_type, treatment) %>%
+  summarize(mean_upregulated_score = mean(upregulated_super_cluster_score),
+            mean_downregulated_score = mean(downregulated_super_cluster_score)) %>%
+  group_by(cell_type) %>%
+  mutate(mean_upregulated_score = scale(mean_upregulated_score),
+         mean_downregulated_score = scale(mean_downregulated_score),
+         mean_upregulated_score_scaled = mean_upregulated_score - mean_upregulated_score[treatment == "Trametinib"],
+         mean_downregulated_score_scaled = mean_downregulated_score - mean_downregulated_score[treatment == "Trametinib"],
+         mean_upregulated_score_scaled = ifelse(mean_upregulated_score_scaled > 2, 2, ifelse(mean_upregulated_score_scaled < -2, -2, mean_upregulated_score_scaled)),
+         mean_downregulated_score_scaled = ifelse(mean_downregulated_score_scaled > 2, 2, ifelse(mean_downregulated_score_scaled < -2, -2, mean_downregulated_score_scaled)))
+
+colData_all_lines_df$cell <- paste0(colData_all_lines_df$cell_type,"_",colData_all_lines_df$treatment)
+colData_all_lines_df <- colData_all_lines_df %>% dplyr::select(-cell_type, -treatment)
+
+co_exposure_cor_matrix_colData <- left_join(co_exposure_cor_matrix_colData,colData_all_lines_df,by = "cell")
+row.names(co_exposure_cor_matrix_colData) <- co_exposure_cor_matrix_colData$cell
+co_exposure_cor_matrix_colData <- co_exposure_cor_matrix_colData[colnames(co_exposure_cor_matrix),]
+identical(row.names(co_exposure_cor_matrix_colData), colnames(co_exposure_cor_matrix))
+#cor_matrix_colData$dose <- sapply(row.names(cor_matrix_colData),function(x){stringr::str_split(x, pattern = "_")[[1]][3] %>% as.numeric()})
+#cor_matrix_colData$dose_character <- as.character(cor_matrix_colData$dose)
+
+co_exposure_deg_test_res %>% 
+  filter(grepl("dose", term), q_value < 0.05, abs(normalized_effect) > 0.05) %>% 
+  group_by(treatment) %>%
+  summarize(n = n()) %>%
+  arrange(n) %>%
+  print(n = 25)
+
+co_exposure_cor_matrix_rowData <- data.frame(row.names = row.names(co_exposure_cor_matrix), id = row.names(co_exposure_cor_matrix), gene_short_name = row.names(co_exposure_cor_matrix))
+
+co_exposure_cor_matrix_cds <- new_cell_data_set(co_exposure_cor_matrix, cell_metadata = co_exposure_cor_matrix_colData, gene_metadata = co_exposure_cor_matrix_rowData)
+
+reducedDims(co_exposure_cor_matrix_cds)[["PCA"]] <- t(exprs(co_exposure_cor_matrix_cds))
+
+co_exposure_cor_matrix_cds <- align_cds(co_exposure_cor_matrix_cds, 
+                            residual_model_formula_str = "~cell_line", 
+                            #alignment_group = "cell_line",
+                            #alignment_k = 5,
+                            verbose = TRUE)
+
+co_exposure_cor_matrix_cds <- reduce_dimension(co_exposure_cor_matrix_cds,
+                                   max_components = 2,
+                                   preprocess_method = "Aligned",
+                                   reduction_method = "UMAP",
+                                   umap.metric = "cosine",
+                                   umap.n_neighbors = 5,
+                                   umap.min_dist = 0.15,#0.2
+                                   umap.fast_sgd = FALSE,
+                                   cores = 1,
+                                   verbose = T)
+
+colData(co_exposure_cor_matrix_cds)$UMAP1 <- reducedDims(co_exposure_cor_matrix_cds)[["UMAP"]][,1]
+colData(co_exposure_cor_matrix_cds)$UMAP2 <- reducedDims(co_exposure_cor_matrix_cds)[["UMAP"]][,2]
+
+co_exposure_cor_matrix_cds <- cluster_cells(co_exposure_cor_matrix_cds, 
+                                resolution = 0.75,
+                                reduction_method = "Aligned",
+                                num_iter = 1, 
+                                random_seed = 2016L)
+
+colData(co_exposure_cor_matrix_cds)$Cluster <- clusters(co_exposure_cor_matrix_cds, reduction_method = "Aligned")
+length(unique(colData(co_exposure_cor_matrix_cds)$Cluster))
+
+n <- 23
+qual_col_pals = RColorBrewer::brewer.pal.info[RColorBrewer::brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(RColorBrewer::brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+set.seed(2016L)
+col_vector <- sample(col_vector, n, replace = FALSE)
+
+colData(co_exposure_cor_matrix_cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, color = treatment, shape = cell_line), size = 3, stroke = 0.2) +
+  #facet_wrap(~cell_line, ncol = 3) +
+  #scale_fill_manual("Predicted\nsensitivity", values = c("Resistant" = "darkorange2", "Sensitive" =  "grey70")) +
+  scale_color_manual("Treatment", values = col_vector)+
+    # values = c("Alectinib" = "grey70",
+    #   "AZ628" = "brown4", 
+    #   "AZD7762" =  "darkgoldenrod3", 
+    #   "BID1870" = "grey70", 
+    #   "BMS345541" = "darkorange2",
+    #   "DDR1IN" = "grey70",
+    #   "Doxorubicin" = "lawngreen",
+    #   "GSK690693" = "darkorange3",
+    #   "Infigratinib" = "darkviolet",
+    #   "KU55933" = "blue",
+    #   "MK2206" = "darkorange1",
+    #   "Nintedanib" = "deeppink2",
+    #   "Nutlin3A" = "black",
+    #   "Palbociclib" = "magenta",
+    #   "PHA767491" = "orchid4",
+    #   "RIPA56" = "grey70",
+    #   "Roscovitine" = "red",
+    #   "Salubrinal" = "grey70",
+    #   "Temozolomide" = "darkolivegreen",
+    #   "Temsirolimus" = "darkorange4",
+    #   "Trametinib" = "firebrick1",
+    #   "VE821" = "grey70",
+    #   "Volasertib" = "navy")) +
+  monocle3:::monocle_theme_opts() +
+  theme_void() +
+  theme(legend.position = "right",
+        text = element_text(size = 6),
+        legend.key.width = unit(0.1,"line"),
+        legend.key.height = unit(0.1,"line")) +
+  guides(guides(colour = guide_legend(override.aes = list(size=1)))) +
+  guides(guides(shape = guide_legend(override.aes = list(size=1))))
+ggsave("UMAPs/Co_exposure_covariance_UMAP_by_treatment_Figure_6C.png", dpi = 600, height = 1.25, width = 2)
+
+colData(co_exposure_cor_matrix_cds) %>%
+  as.data.frame() %>%
+  #mutate(cell_line = factor(cell_line, levels = c("U87MG","T98G","A172"))) %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, fill = Trametinib_correlation, shape = cell_line), size = 3, stroke = 0.2, color = "black") +
+  scale_shape_manual("Cell line", values = c("A172" = 21, "T98G" = 22, "U87MG" = 24)) +
+  scale_fill_gradient2("Correlation to\ntrametinib\nresponse", 
+                       na.value = "grey70", 
+                       low = "blue",
+                       mid = "white",
+                       high = "red") +
+  monocle3:::monocle_theme_opts() +
+  theme_void() +
+  theme(legend.position = "right",
+        text = element_text(size = 6),
+        legend.key.width = unit(0.25,"line"),
+        legend.key.height = unit(0.25,"line")) #+
+  #guides(guides(colour = guide_legend(override.aes = list(size=2))))
+ggsave("UMAPs/Co_exposure_covariance_UMAP_by_trametinib_correlation_Figure_6D.png", dpi = 600, height = 1.25, width = 1.5)
+
+colData(co_exposure_cor_matrix_cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, fill = Cluster, shape = cell_line), size = 3, stroke = 0.3, color = "black") +
+  scale_shape_manual("Cell line", values = c("A172" = 21, "T98G" = 22, "U87MG" = 24)) +
+  scale_fill_manual("Cluster", values = c("1" = "navy", "2" = "brown4", 
+                                          "3" = "darkolivegreen", "4" = "darkcyan",
+                                          "5" = "darkorange2", "6" = "firebrick2")) +
+  monocle3:::monocle_theme_opts() +
+  theme_void() +
+  theme(legend.position = "right",
+        text = element_text(size = 6),
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line")) +
+  guides(guides(fill = guide_legend(override.aes = list(size=2)))) + 
+  guides(guides(color = guide_legend(override.aes = list(size=2)))) 
+ggsave("UMAPs/Co_exposure_covariance_UMAP_by_cluster_Figure_8E.png", dpi = 600, height = 1.5, width = 2)
+
+ggplot(colData(co_exposure_cor_matrix_cds) %>% as.data.frame(), aes(x = Cluster, y = mean_upregulated_score_scaled, fill = Cluster)) +
+  geom_boxplot(size = 0.1, color = "black", outlier.size = 0.1) +
+  ggpubr::stat_compare_means(aes(label = ..p.signif..), ref.group = "1", size = 0.5, method = "wilcox.test") +
+  monocle3:::monocle_theme_opts() +
+  scale_fill_manual("Cluster", values = c("1" = "navy", "2" = "brown4", 
+                                          "3" = "darkolivegreen", "4" = "darkcyan",
+                                          "5" = "darkorange2", "6" = "firebrick2")) +
+  theme(text = element_text(size = 6),
+        legend.position = "none") +
+  xlab("Response group") +
+  ylab("Upregulated\nscore")
+ggsave("UMAPs/Co_exposure_boxplot_by_up_score_Figure_8F_top_panel.png", dpi = 600, height = 1, width = 1)
+
+ggplot(colData(co_exposure_cor_matrix_cds) %>% as.data.frame(), aes(x = Cluster, y = mean_downregulated_score_scaled, fill = Cluster)) +
+  geom_boxplot(size = 0.1, color = "black", outlier.size = 0.1) +
+  ggpubr::stat_compare_means(aes(label = ..p.signif..), ref.group = "1", size = 0.5, method = "wilcox.test") +
+  monocle3:::monocle_theme_opts() +
+  scale_fill_manual("Cluster", values = c("1" = "navy", "2" = "brown4", 
+                                          "3" = "darkolivegreen", "4" = "darkcyan",
+                                          "5" = "darkorange2", "6" = "firebrick2")) +
+  theme(text = element_text(size = 6),
+        legend.position = "none") +
+  xlab("Response group") +
+  ylab("Downregulated\nscore")
+ggsave("UMAPs/Co_exposure_boxplot_by_down_score_Figure_8F_bottom_panel.png", dpi = 600, height = 1, width = 1)
+
+ggplot(colData(cds.list[["A172"]]) %>%
+         as.data.frame() %>%
+         filter(dose != 0, trametinib_dose != 0, treatment %in% c("Palbociclib","AZ628","Trametinib","GSK690693","BMS345541","PHA767491"), is.finite(upregulated_super_cluster_score)) %>%
+         mutate(treatment = factor(treatment, levels = rev(c("Palbociclib","AZ628","Trametinib","GSK690693","BMS345541","PHA767491")))), 
+       aes(x = upregulated_super_cluster_score, y = treatment, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = treatment, fill = dose_character)) +
+  facet_wrap(~dose_character, ncol = 4) +
+  geom_vline(xintercept = colData(cds.list[["A172"]]) %>%
+               as.data.frame() %>%
+               filter(dose == 0.01, treatment %in% c("Trametinib"), is.finite(upregulated_super_cluster_score)) %>%
+               pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Drug]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4),
+        axis.title.y = element_blank())
+  ggsave("Signature_scores/Upregulated_signature_scores_CDK46i_RAFi_NFkBi_CDC7i_AKTi_MEKi_A172_Figure_8G_top_panel.png", width = 2, height = 1.25, dpi = 600)
+
+ggplot(colData(cds.list[["T98G"]]) %>%
+         as.data.frame() %>%
+         filter(dose != 0, trametinib_dose != 0, treatment %in% c("Palbociclib","AZ628","Trametinib","GSK690693","BMS345541","PHA767491"), is.finite(upregulated_super_cluster_score)) %>%
+         mutate(treatment = factor(treatment, levels = rev(c("Palbociclib","AZ628","Trametinib","GSK690693","BMS345541","PHA767491")))), 
+       aes(x = upregulated_super_cluster_score, y = treatment, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = treatment, fill = dose_character)) +
+  facet_wrap(~dose_character, ncol = 4) +
+  geom_vline(xintercept = colData(cds.list[["T98G"]]) %>%
+               as.data.frame() %>%
+               filter(dose == 0.01, treatment %in% c("Trametinib"), is.finite(upregulated_super_cluster_score)) %>%
+               pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Drug]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4),
+        axis.title.y = element_blank())
+  ggsave("Signature_scores/Upregulated_signature_scores_CDK46i_RAFi_NFkBi_CDC7i_AKTi_MEKi_T98G_Figure_8G_middle_panel.png", width = 2, height = 1.25, dpi = 600)
+
+ggplot(colData(cds.list[["U87MG"]]) %>%
+         as.data.frame() %>%
+         filter(dose != 0, trametinib_dose != 0, treatment %in% c("Palbociclib","AZ628","Trametinib","GSK690693","BMS345541","PHA767491"), is.finite(upregulated_super_cluster_score)) %>%
+         mutate(treatment = factor(treatment, levels = rev(c("Palbociclib","AZ628","Trametinib","GSK690693","BMS345541","PHA767491")))), 
+       aes(x = upregulated_super_cluster_score, y = treatment, fill = dose_character)) +
+  ggridges::geom_density_ridges(size = 0.1, aes(x = upregulated_super_cluster_score, y = treatment, fill = dose_character)) +
+  facet_wrap(~dose_character, ncol = 4) +
+  geom_vline(xintercept = colData(cds.list[["U87MG"]]) %>%
+               as.data.frame() %>%
+               filter(dose == 0.01, treatment %in% c("Trametinib"), is.finite(upregulated_super_cluster_score)) %>%
+               pull(upregulated_super_cluster_score) %>% median(), color = "red", size = 0.1) +
+  scale_fill_viridis_d(option = "magma") +
+  ylab("[Drug]\n(µM)") +
+  xlab("Upregulated\nsignature score") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        legend.position = "none",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(0.5,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4),
+        axis.title.y = element_blank())
+  ggsave("Signature_scores/Upregulated_signature_scores_CDK46i_RAFi_NFkBi_CDC7i_AKTi_MEKi_U87MG_Figure_8G_bottom_panel.png", width = 2, height = 1.25, dpi = 600)
+
+### Inspect the effect of each drug alone or in combination with trametinib on viability using sci-Plex inferred viability
+# Viability estimates for single exposures
+
+A172_viability_df <- colData(cds.list[["A172"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose == 0| treatment == "Trametinib") %>%
+  group_by(treatment, dose, replicate) %>%
+  summarize(total_cells = n()) %>%
+  mutate(total_cells = ifelse(treatment == "vehicle",total_cells/7,total_cells)) %>%
+  ungroup()
+
+treatments <- unique(A172_viability_df$treatment)
+treatments <- treatments[treatments != "vehicle"]
+
+A172_vehicle_counts <- A172_viability_df %>% filter(treatment == "vehicle")
+A172_rep1_vehicle_counts <- A172_vehicle_counts[A172_vehicle_counts$replicate == "rep1",]$total_cells
+A172_rep2_vehicle_counts <- A172_vehicle_counts[A172_vehicle_counts$replicate == "rep2",]$total_cells
+
+A172_vehicle_count_df <- data.frame(treatment = c(treatments,treatments),
+                               dose = rep(0, length(treatments)*2),
+                               replicate = c(rep("rep1",length(treatments)),
+                                             rep("rep2",length(treatments))),
+                               total_cells = c(rep(A172_rep1_vehicle_counts,length(treatments)),
+                                               rep(A172_rep2_vehicle_counts,length(treatments))))
+
+A172_viability_df <- rbind(A172_viability_df,A172_vehicle_count_df) %>% filter(treatment != "vehicle")
+
+ggplot(A172_viability_df) +
+  geom_point(aes(x = log10(dose + 0.001), y = total_cells, fill = replicate), size = 1, stroke = 0.05, shape = 21) +
+  facet_wrap(~treatment, ncol = 5) +
+  ggformula::geom_spline(aes(x = log10(dose + 0.001), y = total_cells), size = 0.1) +
+  scale_fill_manual("Replicate", values = c("rep1" = "brown4", "rep2" = "navy")) +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 5),
+          legend.position = "right",
+          legend.key.width = unit(0.5,"line"),
+          legend.key.height = unit(1,"line"),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  guides(guides(fill = guide_legend(override.aes = list(size=3)))) +
+  ggsave("Survival_curves/Single_exposure_drug_response_curves_A172_Supplementary_Figure_9A.png", width =3, height = 3, dpi = 600)
+
+T98G_viability_df <- colData(cds.list[["T98G"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose == 0| treatment == "Trametinib") %>%
+  group_by(treatment, dose, replicate) %>%
+  summarize(total_cells = n()) %>%
+  mutate(total_cells = ifelse(treatment == "vehicle",total_cells/7,total_cells)) %>%
+  ungroup()
+
+treatments <- unique(T98G_viability_df$treatment)
+treatments <- treatments[treatments != "vehicle"]
+
+T98G_vehicle_counts <- T98G_viability_df %>% filter(treatment == "vehicle")
+T98G_rep1_vehicle_counts <- T98G_vehicle_counts[T98G_vehicle_counts$replicate == "rep1",]$total_cells
+T98G_rep2_vehicle_counts <- T98G_vehicle_counts[T98G_vehicle_counts$replicate == "rep2",]$total_cells
+
+T98G_vehicle_count_df <- data.frame(treatment = c(treatments,treatments),
+                                    dose = rep(0, length(treatments)*2),
+                                    replicate = c(rep("rep1",length(treatments)),
+                                                  rep("rep2",length(treatments))),
+                                    total_cells = c(rep(T98G_rep1_vehicle_counts,length(treatments)),
+                                                    rep(T98G_rep2_vehicle_counts,length(treatments))))
+
+T98G_viability_df <- rbind(T98G_viability_df,T98G_vehicle_count_df) %>% filter(treatment != "vehicle")
+
+ggplot(T98G_viability_df) +
+  geom_point(aes(x = log10(dose + 0.001), y = total_cells, fill = replicate), size = 1, stroke = 0.05, shape = 21) +
+  facet_wrap(~treatment, ncol = 5) +
+  ggformula::geom_spline(aes(x = log10(dose + 0.001), y = total_cells), size = 0.1) +
+  scale_fill_manual("Replicate", values = c("rep1" = "brown4", "rep2" = "navy")) +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 5),
+        legend.position = "right",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(1,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  guides(guides(fill = guide_legend(override.aes = list(size=3)))) +
+  ggsave("Survival_curves/Single_exposure_drug_response_curves_T98G_Supplementary_Figure_9B.png", width = 3, height = 3, dpi = 600)
+
+U87MG_viability_df <- colData(cds.list[["U87MG"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose == 0| treatment == "Trametinib") %>%
+  group_by(treatment, dose, replicate) %>%
+  summarize(total_cells = n()) %>%
+  mutate(total_cells = ifelse(treatment == "vehicle",total_cells/7,total_cells)) %>%
+  ungroup()
+
+treatments <- unique(U87MG_viability_df$treatment)
+treatments <- treatments[treatments != "vehicle"]
+
+U87MG_vehicle_counts <- U87MG_viability_df %>% filter(treatment == "vehicle")
+U87MG_rep1_vehicle_counts <- U87MG_vehicle_counts[U87MG_vehicle_counts$replicate == "rep1",]$total_cells
+U87MG_rep2_vehicle_counts <- U87MG_vehicle_counts[U87MG_vehicle_counts$replicate == "rep2",]$total_cells
+
+U87MG_vehicle_count_df <- data.frame(treatment = c(treatments,treatments),
+                                    dose = rep(0, length(treatments)*2),
+                                    replicate = c(rep("rep1",length(treatments)),
+                                                  rep("rep2",length(treatments))),
+                                    total_cells = c(rep(U87MG_rep1_vehicle_counts,length(treatments)),
+                                                    rep(U87MG_rep2_vehicle_counts,length(treatments))))
+
+U87MG_viability_df <- rbind(U87MG_viability_df,U87MG_vehicle_count_df) %>% filter(treatment != "vehicle")
+
+ggplot(U87MG_viability_df) +
+  geom_point(aes(x = log10(dose + 0.001), y = total_cells, fill = replicate), size = 1, stroke = 0.05, shape = 21) +
+  facet_wrap(~treatment, ncol = 5) +
+  ggformula::geom_spline(aes(x = log10(dose + 0.001), y = total_cells), size = 0.1) +
+  scale_fill_manual("Replicate", values = c("rep1" = "brown4", "rep2" = "navy")) +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 5),
+        legend.position = "right",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(1,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  guides(guides(fill = guide_legend(override.aes = list(size=3)))) +
+  ggsave("Survival_curves/Single_exposure_drug_response_curves_U87MG_Supplementary_Figure_9C.png", width = 3, height = 3, dpi = 600)
+
+# Viability estimates for combinatorial exposures
+A172_co_exposure_viability_df <- colData(cds.list[["A172"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose != 0) %>%
+  group_by(treatment, dose, replicate) %>%
+  summarize(total_cells = n()) %>%
+  ungroup()
+
+ggplot(A172_co_exposure_viability_df) +
+  geom_point(aes(x = log10(dose + 0.001), y = total_cells, fill = replicate), size = 1, stroke = 0.05, shape = 21) +
+  facet_wrap(~treatment, ncol = 5) +
+  ggformula::geom_spline(aes(x = log10(dose + 0.001), y = total_cells), size = 0.1) +
+  scale_fill_manual("Replicate", values = c("rep1" = "brown4", "rep2" = "navy")) +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 5),
+        legend.position = "right",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(1,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  guides(guides(fill = guide_legend(override.aes = list(size=3)))) +
+  ggsave("Survival_curves/Co_exposure_drug_response_curves_A172_Supplementary_Figure_9D.png", width = 3, height = 3, dpi = 600)
+
+  T98G_co_exposure_viability_df <- colData(cds.list[["T98G"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose != 0) %>%
+  group_by(treatment, dose, replicate) %>%
+  summarize(total_cells = n()) %>%
+  ungroup()
+
+ggplot(T98G_co_exposure_viability_df) +
+  geom_point(aes(x = log10(dose + 0.001), y = total_cells, fill = replicate), size = 1, stroke = 0.05, shape = 21) +
+  facet_wrap(~treatment, ncol = 5) +
+  ggformula::geom_spline(aes(x = log10(dose + 0.001), y = total_cells), size = 0.1) +
+  scale_fill_manual("Replicate", values = c("rep1" = "brown4", "rep2" = "navy")) +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 5),
+        legend.position = "right",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(1,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  guides(guides(fill = guide_legend(override.aes = list(size=3)))) +
+  ggsave("Survival_curves/Co_exposure_drug_response_curves_T98G_Supplementary_Figure_9E.png", width = 3, height = 3, dpi = 600)
+
+U87MG_co_exposure_viability_df <- colData(cds.list[["U87MG"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose != 0) %>%
+  group_by(treatment, dose, replicate) %>%
+  summarize(total_cells = n()) %>%
+  ungroup()
+
+ggplot(U87MG_co_exposure_viability_df) +
+  geom_point(aes(x = log10(dose + 0.001), y = total_cells, fill = replicate), size = 1, stroke = 0.05, shape = 21) +
+  facet_wrap(~treatment, ncol = 5) +
+  ggformula::geom_spline(aes(x = log10(dose + 0.001), y = total_cells), size = 0.1) +
+  scale_fill_manual("Replicate", values = c("rep1" = "brown4", "rep2" = "navy")) +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 5),
+        legend.position = "right",
+        legend.key.width = unit(0.5,"line"),
+        legend.key.height = unit(1,"line"),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 4)) +
+  guides(guides(fill = guide_legend(override.aes = list(size=3)))) +
+  ggsave("Survival_curves/Co_exposure_drug_response_curves_U87MG_Supplementary_Figure_9F.png", width = 3, height = 3, dpi = 600)
+
+

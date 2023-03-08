@@ -1,0 +1,276 @@
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(furrr)
+library(piano)
+library(monocle3)
+
+# Set DelayedArray Parameters
+DelayedArray:::set_verbose_block_processing(TRUE)
+options(DelayedArray.block.size = 1000e7)
+options(stringsAsFactors = FALSE)
+
+### Source files and functions including those from our previous sci-plex repository 
+### (https://github.com/cole-trapnell-lab/sci-plex)
+source("sci-plex/bin/cell_cycle.R")
+cc.genes = readRDS("~/sci-plex/bin/cc.genes.RDS")
+
+### Define functions
+test_signature_drug_dependence <- function(signature_cds_subset, 
+  signature_cds, 
+  reference_cells=NULL, 
+  min_fraction_cells=0.05, 
+  pseudodose=0.001, 
+  residualModelFormulaTerms=NULL){
+
+  cell_ids_to_test = as.character(signature_cds_subset$cell)
+
+  signature_cds_subset = signature_cds[,union(cell_ids_to_test, reference_cells)]
+
+  drug = unique(colData(signature_cds_subset)$treatment)
+  drug = drug[drug != "vehicle"]
+
+  print(drug)
+
+  message(paste("Testing cells exposed to ", drug))
+  message(paste("Fitting models to", nrow(signature_cds_subset), "genes"))
+
+  modelFormulaStr = "~replicate + log(dose + 0.001)"
+
+  if (is.null(residualModelFormulaTerms) == FALSE & length(residualModelFormulaTerms) > 0){
+    for (i in (1:length(residualModelFormulaTerms))){
+      if (length(unique(pData(signature_cds_subset)[,residualModelFormulaTerms[i]])) > 1){
+        modelFormulaStr = paste(modelFormulaStr, "+", residualModelFormulaTerms[i])
+      }
+    }
+  }
+  
+  model_tbl = fit_models(signature_cds_subset, 
+                         model_formula_str = modelFormulaStr, 
+                         reltol=1e-5, 
+                         verbose=TRUE)
+  model_coefs = coefficient_table(model_tbl) %>% 
+    dplyr::select(-model,-model_summary)
+
+  model_coefs
+
+}
+
+#############################################################################################
+
+### Load in data from notebook 1 cleanup
+cds.list <- readRDS("GSM7056151_sciPlex_4_preprocessed_cds.list.rds")
+
+for(cell_type in names(cds.list)){
+
+  colData(cds.list[[cell_type]])$dose_character <- as.character(colData(cds.list[[cell_type]])$dose)
+
+}
+
+for(cell_type in names(cds.list)){
+
+  cds.list[[cell_type]] <- estimate_cell_cycle(cds.list[[cell_type]],
+  						                                 g1s_markers = cc.genes$s.genes, 
+  						                                 g2m_markers = cc.genes$g2m.genes)
+
+}
+
+expressed_genes.list <- list()
+
+for(cell_type  in names(cds.list)){
+
+	expressed_genes.list[[cell_type]] <- row.names(rowData(cds.list[[cell_type]])[Matrix::rowSums(exprs(cds.list[[cell_type]]) > 0) > dim(cds.list[[cell_type]])[2]*0.01 ,])
+  print(length(expressed_genes.list[[cell_type]]))
+
+}
+
+vehicle_cells.list <- list()
+
+for(cell_type in names(cds.list)){
+  
+    vehicle_cells.list[[cell_type]] <- colData(cds.list[[cell_type]]) %>% 
+      as.data.frame() %>%  
+      filter(trametinib_dose == 0  & treatment == "vehicle") %>% 
+      pull(cell) %>%
+      unique()
+
+  print(length(vehicle_cells.list[[cell_type]]))
+
+}
+
+### Load information on conserved gene modules
+Jaccard_collapsed_clusters <- readRDS("Jaccard_collapsed_up_and_down_regulated_clusters_cutree.rds")
+
+upregulated_dose_responsive_genes <- Jaccard_collapsed_clusters %>%
+  filter(super_cluster_id == "upregulated_super_cluster_1") %>%
+  pull(id)
+
+downregulated_dose_responsive_genes <- Jaccard_collapsed_clusters %>%
+  filter(super_cluster_id == "downregulated_super_cluster_2") %>%
+  pull(id)
+
+signature_genes <- union(upregulated_dose_responsive_genes,downregulated_dose_responsive_genes)
+
+### Identify modules genes that are expressed in our validation chemical gemomic experiment
+signature_test_genes.list <- list()
+
+for(cell_type in names(cds.list)){
+
+	signature_test_genes.list[[cell_type]] <- intersect(signature_genes,expressed_genes.list[[cell_type]])
+	print(length(signature_test_genes.list[[cell_type]]))
+
+}
+
+### Identify modules genes that arer also differentially expressed as a function of a mono or combinatorial
+### treatment in our validation experiment
+drugs <- unique(colData(cds.list[["A172"]])$treatment) 
+drugs <- drugs[drugs != "vehicle"] %>% sort()
+
+
+options(future.globals.maxSize = 891289600 * 10)
+plan(multiprocess, workers = 15)
+
+A172_signature_single_drug_deg_test_res =
+  colData(cds.list[["A172"]]) %>%
+  as.data.frame() %>%
+  filter((trametinib_dose == 0 & treatment != "vehicle") | treatment == "Trametinib") %>% 
+  tibble::rownames_to_column() %>%
+  group_by(treatment) %>%
+  nest() %>%
+  mutate(
+    test_res = furrr::future_map(
+      data,
+      .f = test_signature_drug_dependence,
+      cds.list[["A172"]][signature_test_genes.list[["A172"]],],
+      vehicle_cells.list[["A172"]],
+      residualModelFormulaTerms = NULL,
+      .progress = TRUE
+    )
+  )
+
+
+# saveRDS(A172_signature_single_drug_deg_test_res,"A172_signature_single_drug_deg_test_res.rds")
+
+T98G_signature_single_drug_deg_test_res =
+  colData(cds.list[["T98G"]]) %>%
+  as.data.frame() %>%
+  filter((trametinib_dose == 0 & treatment != "vehicle") | treatment == "Trametinib") %>% 
+  tibble::rownames_to_column() %>%
+  group_by(treatment) %>%
+  nest() %>%
+  mutate(
+    test_res = furrr::future_map(
+      data,
+      .f = test_signature_drug_dependence,
+      cds.list[["T98G"]][signature_test_genes.list[["T98G"]],],
+      vehicle_cells.list[["T98G"]],
+      residualModelFormulaTerms = NULL,
+      .progress = TRUE
+    )
+  )
+
+
+# saveRDS(T98G_signature_single_drug_deg_test_res,"T98G_signature_single_drug_deg_test_res.rds")
+
+U87MG_signature_single_drug_deg_test_res =
+  colData(cds.list[["U87MG"]]) %>%
+  as.data.frame() %>%
+  filter((trametinib_dose == 0 & treatment != "vehicle") | treatment == "Trametinib") %>% 
+  tibble::rownames_to_column() %>%
+  group_by(treatment) %>%
+  nest() %>%
+  mutate(
+    test_res = furrr::future_map(
+      data,
+      .f = test_signature_drug_dependence,
+      cds.list[["U87MG"]][signature_test_genes.list[["U87MG"]],],
+      vehicle_cells.list[["U87MG"]],
+      residualModelFormulaTerms = NULL,
+      .progress = TRUE
+    )
+  )
+
+
+# saveRDS(U87MG_signature_single_drug_deg_test_res,"U87MG_signature_single_drug_deg_test_res.rds")
+
+A172_signature_co_exposure_drug_deg_test_res =
+  colData(cds.list[["A172"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose != 0) %>% 
+  tibble::rownames_to_column() %>%
+  group_by(treatment) %>%
+  nest() %>%
+  mutate(
+    test_res = furrr::future_map(
+      data,
+      .f = test_signature_drug_dependence,
+      cds.list[["A172"]][signature_test_genes.list[["A172"]],],
+      vehicle_cells.list[["A172"]],
+      residualModelFormulaTerms = NULL,
+      .progress = TRUE
+    )
+  )
+
+
+# saveRDS(A172_signature_co_exposure_drug_deg_test_res,"A172_signature_co_exposure_drug_deg_test_res.rds")
+
+T98G_signature_co_exposure_drug_deg_test_res =
+  colData(cds.list[["T98G"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose != 0) %>% 
+  tibble::rownames_to_column() %>%
+  group_by(treatment) %>%
+  nest() %>%
+  mutate(
+    test_res = furrr::future_map(
+      data,
+      .f = test_signature_drug_dependence,
+      cds.list[["T98G"]][signature_test_genes.list[["T98G"]],],
+      vehicle_cells.list[["T98G"]],
+      residualModelFormulaTerms = NULL,
+      .progress = TRUE
+    )
+  )
+
+
+# saveRDS(T98G_signature_co_exposure_drug_deg_test_res,"T98G_signature_co_exposure_drug_deg_test_res.rds")
+
+U87MG_signature_co_exposure_drug_deg_test_res =
+  colData(cds.list[["U87MG"]]) %>%
+  as.data.frame() %>%
+  filter(trametinib_dose != 0) %>% 
+  tibble::rownames_to_column() %>%
+  group_by(treatment) %>%
+  nest() %>%
+  mutate(
+    test_res = furrr::future_map(
+      data,
+      .f = test_signature_drug_dependence,
+      cds.list[["U87MG"]][signature_test_genes.list[["U87MG"]],],
+      vehicle_cells.list[["U87MG"]],
+      residualModelFormulaTerms = NULL,
+      .progress = TRUE
+    )
+  )
+
+
+# saveRDS(U87MG_signature_co_exposure_drug_deg_test_res,"U87MG_signature_co_exposure_drug_deg_test_res.rds")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

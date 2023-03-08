@@ -1,0 +1,191 @@
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(purrr)
+library(furrr)
+library(monocle3)
+
+# Set DelayedArray Parameters
+DelayedArray:::set_verbose_block_processing(TRUE)
+options(DelayedArray.block.size = 1000e7)
+options(stringsAsFactors = FALSE)
+
+### Source files and functions including those from our previous sci-plex repository 
+### (https://github.com/cole-trapnell-lab/sci-plex)
+source("sci-plex/bin/cell_cycle.R")
+source("sci-plex/bin/loadGSCSafe.R")
+source("sci-plex/bin/GSA_helper_functions.R")
+cc.genes = readRDS("sci-plex/bin/cc.genes.RDS")
+
+### Read in cds object output by the processing pipeline post hash assignment
+cds <- readRDS("cds_2.RDS")
+names(colData(cds))[names(colData(cds)) == 'Cell'] <- 'cell'
+
+### Annotate metadata with RT barcode information for the experiment
+colData(cds)$RT_well <- sapply(colData(cds)$cell, function(x){
+  
+  RT_well <- stringr::str_split(x, pattern = "_")[[1]][5]
+  RT_well <- as.numeric(RT_well)
+  
+})
+
+cds <- cds[,colData(cds)$RT_well %in% c(1:96)]
+
+### Annotate cell line information usign RT barcode (cell lines were arrayed ruding RT)
+colData(cds)$cell_type <- sapply(colData(cds)$RT_well, function(x){
+  
+  if(x %in% c(1:4,13:16,25:28,37:40,49:52,61:64,73:76,85:88))return("A172")
+  if(x %in% c(5:8,17:20,29:32,41:44,53:56,65:68,77:80,89:92))return("T98G")
+  if(x %in% c(9:12,21:24,33:36,45:48,57:60,69:72,81:84,93:96))return("U87MG")
+  return(NA)
+  
+})
+
+### Given the size of the datatset. There are a small number of cells missassigned by the hashes across cell types.
+### Below we use dimensionality reduction to filter for these instances, which although rare may have an outsize
+### effect on downstream analyses.
+
+cds <- detect_genes(cds)
+cds <- estimate_size_factors(cds)
+cds <- estimate_cell_cycle(cds,
+						   g1s_markers = cc.genes$s.genes, 
+                           g2m_markers = cc.genes$g2m.genes)
+
+expressed_genes <- row.names(fData(cds)[Matrix::rowSums(exprs(cds) > 0) > 
+                                              dim(cds)[2]*0.05 ,])
+
+cds <- preprocess_cds(cds,
+                      method = "PCA",
+                      num_dim = 25,
+                      norm_method = "log",
+                      use_genes = expressed_genes)
+
+cds <- reduce_dimension(cds,
+                        max_components = 2,
+                        preprocess_method = "PCA",
+                        reduction_method = "UMAP",
+                        umap.metric = "cosine",
+                        umap.n_neighbors = 20,
+                        umap.min_dist = 0.1,
+                        umap.fast_sgd=FALSE,
+                        cores=1,
+                        verbose = T)
+
+colData(cds)$UMAP1 <- reducedDims(cds)[["UMAP"]][,1] 
+colData(cds)$UMAP2 <- reducedDims(cds)[["UMAP"]][,2]
+
+cds <- cluster_cells(cds,
+					 resolution = 1e-5)
+
+colData(cds)$Cluster <- clusters(cds)
+length(unique(colData(cds)$Cluster))
+colData(cds)$Partition <- partitions(cds)
+length(unique(colData(cds)$Partition))
+
+colData(cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, color = cell_type, fill = cell_type), size = 0.5, stroke = 0.01, shape = 21) +
+  monocle3:::monocle_theme_opts() +
+  theme_void() +
+  theme(legend.position = "right",
+        text = element_text(size = 6),
+        legend.key.width = unit(0.2,"line"),
+        legend.key.height = unit(0.25,"line")) +
+  guides(guides(colour = guide_legend(override.aes = list(size=2)))) +
+  ggsave("UMAPs/UMAP_by_cell_type.png", dpi = 600, height = 1, width = 1.5)
+
+ colData(cds) %>%
+  as.data.frame() %>%
+  ggplot() +
+  geom_point(aes(x = UMAP1, y  = UMAP2, color = Partition, fill = Partition), size = 0.5, stroke = 0.01, shape = 21) +
+  facet_wrap(~cell_type, ncol = 3) +
+  monocle3:::monocle_theme_opts() +
+  theme_void() +
+  theme(legend.position = "right",
+        text = element_text(size = 6),
+        legend.key.width = unit(0.2,"line"),
+        legend.key.height = unit(0.25,"line")) +
+  guides(guides(colour = guide_legend(override.aes = list(size=2)))) +
+  ggsave("UMAPs/UMAP_by_Partition_faceted.png", dpi = 600, height = 1, width = 3)
+
+### Filter doublets using hashes. Number of cells after hash filtering 991940 (4.870047% empirical doublet rate)
+cds <- cds[,colData(cds)$top_to_second_best_ratio_W >= 2.5  &
+             colData(cds)$hash_umis_W >= 5 &
+             !is.na(colData(cds)$top_oligo_W)]
+
+### Keep cells where hash assignment and cluster/partition distribution agrees across the majority of cells
+### Note: This may vary given system speific dimensionality reduction and clustering results. The preprocess
+### list of cds objects on GEO (GSM7056151_sciPlex_4_preprocessed_cds.list.rds) contains the cells that were kept for analysis.
+A172_cells <- colData(cds) %>% 
+	as.data.frame() %>% 
+	filter(cell_type == "A172" & Partition == "2") %>%
+	pull(cell)
+
+T98G_cells <- colData(cds) %>% 
+	as.data.frame() %>% 
+	filter(cell_type == "T98G" & Partition == "1") %>%
+	pull(cell)
+
+U87MG_cells <- colData(cds) %>% 
+	as.data.frame() %>% 
+	filter(cell_type == "U87MG" & Partition == "3") %>%
+	pull(cell)
+
+# saveRDS(A172_cells,"A172_cells.rds")
+# saveRDS(T98G_cells,"T98G_cells.rds")
+# saveRDS(U87MG_cells,"U87MG_cells.rds")
+
+cds <- cds[,c(A172_cells,T98G_cells,U87MG_cells)]
+
+### Add additional useful metadata based on hashes
+colData(cds)$hash_plate <- sapply(colData(cds)$top_oligo_W, function(x){
+  stringr::str_split(x, pattern = "_")[[1]][1]
+})
+
+colData(cds)$replicate <- sapply(colData(cds)$top_oligo_W, function(x){
+  stringr::str_split(x, pattern = "_")[[1]][5]
+})
+
+colData(cds)$trametinib_dose <- sapply(colData(cds)$top_oligo_W, function(x){
+  trametinib_dose <- stringr::str_split(x, pattern = "_")[[1]][2]
+  trametinib_dose <- as.numeric(trametinib_dose)
+})
+
+colData(cds)$treatment <- sapply(colData(cds)$top_oligo_W, function(x){
+  stringr::str_split(x, pattern = "_")[[1]][3]
+})
+
+colData(cds)$dose <- sapply(colData(cds)$top_oligo_W, function(x){
+  
+  dose <- stringr::str_split(x, pattern = "_")[[1]][4]
+  dose <- as.numeric(dose)
+  
+})
+
+colData(cds)$dose_character <- as.character(colData(cds)$dose)
+
+### Set singly trametinib exposed cells as trametinib instead of vehicle 
+### for treatment to be consistent with trametinib dose
+new_treatment <- colData(cds) %>%
+    as.data.frame() %>%
+    mutate(treatment = ifelse(treatment == "vehicle" & trametinib_dose != 0,"Trametinib",treatment)) %>%
+    pull(treatment)
+
+new_dose <- colData(cds) %>%
+    as.data.frame() %>%
+    mutate(dose = ifelse(treatment == "vehicle" & trametinib_dose != 0,trametinib_dose,dose)) %>%
+    pull(dose)
+
+colData(cds)$treatment <- new_treatment
+colData(cds)$dose <- new_dose
+
+cds.list <- list()
+
+cds.list[["A172"]] <-  cds[,colData(cds)$cell_type == "A172"]
+cds.list[["T98G"]] <-  cds[,colData(cds)$cell_type == "T98G"]
+cds.list[["U87MG"]] <-  cds[,colData(cds)$cell_type == "U87MG"]
+
+### The list below is equivalent to GSM7056151_sciPlex_4_preprocessed_cds.list.rds on the GEO repository.
+# saveRDS(cds.list, "sciPlex_4_preprocessed_cds.list.rds")
+
