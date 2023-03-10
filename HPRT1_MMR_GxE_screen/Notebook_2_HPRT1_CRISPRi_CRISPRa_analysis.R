@@ -75,21 +75,6 @@ colData(HPRT1_plot_subset)$plot_label <- factor(colData(HPRT1_plot_subset)$plot_
                                                 levels = c("NTC",
                                                            "HPRT1_CRISPRi",
                                                            "HPRT1_CRISPRa"))  
-# plot_genes_violin(HPRT1_plot_subset,
-#                   group_cells_by = "plot_label") +
-#   scale_fill_manual(values = c("NTC" = "dimgrey",
-#                                "HPRT1_CRISPRi" = "navy",
-#                                "HPRT1_CRISPRa" = "brown4"),
-#                     labels = c("NTC" = "dimgrey",
-#                                "HPRT1_CRISPRi" = "navy",
-#                                "HPRT1_CRISPRa" = "brown4")) +
-#   theme(text = element_text(size = 6),
-#         legend.key.width = unit(0.4,"line"), 
-#         legend.key.height = unit(0.4,"line"),
-#         axis.text.x = element_text(angle = 45, hjust = 1),
-#         axis.title.x = element_blank()) +
-#   ggsave("gRNA_QC_plots/HPRT1_levels_across_CRISPRs.png", 
-#          dpi = 600, height = 1.5, width = 1)
 
 colData(HPRT1_plot_subset)$gene_id <- factor(colData(HPRT1_plot_subset)$gene_id, levels = c("NTC","HPRT1"))
 
