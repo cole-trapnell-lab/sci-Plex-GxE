@@ -754,28 +754,6 @@ ggplot(kd_diff_test_results_filtered, aes(x = normalized_effect,
   ggsave("DEG_testing/Effect_size_distribution_MGMT.png", 
          dpi = 600, width = 1.5, height = 1)
 
-ggplot(kd_diff_test_results_filtered, aes(x = p_value)) +
-  geom_histogram(bins = 100) +
-  monocle3:::monocle_theme_opts() +
-  theme(text = element_text(size = 6),
-        legend.key.width = unit(0.2,"line"),
-        legend.key.height = unit(0.2,"line")) +
-  xlab("p value") +
-  guides(guides(colour = guide_legend(override.aes = list(size=2)))) +
-  ggsave("DEG_testing/p_value_distribution.png", 
-         dpi = 600, width = 1.5, height = 1)
-
-ggplot(kd_diff_test_results_filtered, aes(x = q_value)) +
-  geom_histogram(bins = 100) +
-  monocle3:::monocle_theme_opts() +
-  theme(text = element_text(size = 6),
-        legend.key.width = unit(0.2,"line"),
-        legend.key.height = unit(0.2,"line")) +
-  xlab("q value") +
-  guides(guides(colour = guide_legend(override.aes = list(size=2)))) +
-  ggsave("DEG_testing/q_value_distribution.png", 
-         dpi = 600, width = 1.5, height = 1)
-
 kd_sig_genes <- kd_diff_test_results_filtered %>%
   filter(q_value < 0.005) %>%
   pull(id) %>% unique()
