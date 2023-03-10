@@ -203,9 +203,7 @@ U87MG_PI_perturbing_kinases <- U87MG_proliferation_index_test_res_df %>%
 proliferation_index_test_res_df <- Reduce("rbind",list(A172_proliferation_index_test_res_df,T98G_proliferation_index_test_res_df,U87MG_proliferation_index_test_res_df))
 # saveRDS(proliferation_index_test_res_df, "proliferation_index_test_res_df.rds")
 
-PI_perturbing_kinases <- Reduce("union",
-								list(A172_PI_perturbing_kinases,T98G_PI_perturbing_kinases,U87MG_PI_perturbing_kinases)) %>% 
-	unique()
+PI_perturbing_kinases <- Reduce("union",list(A172_PI_perturbing_kinases,T98G_PI_perturbing_kinases,U87MG_PI_perturbing_kinases)) %>% unique()
 
 ### Exclude kinases with very low numbers of cells per genotype per condition (i.e., drug, dose combinations).
 cell_number_summary.list <- list()
