@@ -213,6 +213,9 @@ colData(cds) %>%
         legend.key.height = unit(0.4,"line"))
     ggsave("UMAPs/Cluster_hash_purity_and_cell_line.png", dpi = 600, height = 1, width = 2.5)
 
+### Note: If you rerun this pipeline the cluster assignments below may change depending on your environment.
+### You can identify the filtered cells from the cds object in GEO (GSM7056149_sciPlexGxE_2_preprocessed_cds.list.RDS) 
+### which are already prefiltered by this code.
 ### Keep cells were hash assignment and cluster/partition distribution agrees across the majority of cells
 A172_cell_list <- row.names(colData(cds)[colData(cds)$cell_line == "A172" &
                               colData(cds)$Partition %in% c("1","5"),])
