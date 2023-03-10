@@ -14,4 +14,4 @@ The data presented in our manuscript are derived from one of 4 single-cell scree
 | sciPlex_4 | Combinatorial Chemical Genomic Screen      | [GSM7056151](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM7056151)| combinatorial_chemical_screen |
 
 ##### Data processing and analysis
-The scripts and code to process the data can be found in the [process\_from_raw](https://github.com/cole-trapnell-lab/sci-Plex-GxE/tree/main/process_from_raw) folder. The scripts and code to analyze the data can be found in the folders for each experiment. 
+The scripts and code to process the data can be found in the [process\_from_raw](https://github.com/cole-trapnell-lab/sci-Plex-GxE/tree/main/process_from_raw) folder. The scripts and code to analyze the data can be found in the folders for each experiment. To access all files and functions used in this study, download the [sci-Plex](https://github.com/cole-trapnell-lab/sci-plex) github repository.
