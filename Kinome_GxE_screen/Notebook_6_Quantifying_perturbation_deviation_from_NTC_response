@@ -239,63 +239,6 @@ fit_distance_models <- function(df_subset,df, drug = drug, pseudocount = 0.01){
   return(angular_diff_test)
 
 }
-
-######
-calculate_aggregate_expression_score <- function(cds, signature_genes, from_id = FALSE){
-
-  if(from_id == TRUE){
-    cds_subset = cds[rowData(cds)$id %in% signature_genes,]
-  }
-  else(cds_subset = cds[rowData(cds)$gene_short_name %in% signature_genes,])
-  aggregate_signature_expression = exprs(cds_subset)
-  aggregate_signature_expression = t(t(aggregate_signature_expression) / pData(cds_subset)$Size_Factor)
-  aggregate_signature_expression = Matrix::colSums(aggregate_signature_expression)
-  aggregate_signature_expression = log(aggregate_signature_expression+1)
-  return(aggregate_signature_expression)
-}
-
-test_signature_kd_dependence <- function(signature_cds_subset, 
-  signature_cds, 
-  reference_cells=NULL, 
-  min_fraction_cells=0.05, 
-  pseudodose=0.001, 
-  residualModelFormulaTerms=NULL){
-
-  cell_ids_to_test = as.character(signature_cds_subset$cell)
-  print(length(cell_ids_to_test))
-
-  signature_cds_subset = signature_cds[,union(cell_ids_to_test, reference_cells)]
-
-  target = unique(pData(signature_cds_subset)$gene_id)
-  target = target[target != "NTC"]
-
-  colData(signature_cds_subset)$gene_id <- factor(colData(signature_cds_subset)$gene_id, 
-                                                  levels = c("NTC",target))
-
-  message(paste("Testing cells perturbed for", target))
-  message(paste("Fitting knockdown effect models to", nrow(signature_cds_subset), "genes"))
-
-  #colData(signature_cds_subset)$pseudodose <- log(colData(signature_cds_subset)$dose + pseudodose)
-
-  modelFormulaStr = "~gene_id + replicate + log(dose + 0.001)"
-
-  if (is.null(residualModelFormulaTerms) == FALSE & length(residualModelFormulaTerms) > 0){
-    for (i in (1:length(residualModelFormulaTerms))){
-      if (length(unique(pData(signature_cds_subset)[,residualModelFormulaTerms[i]])) > 1){
-        modelFormulaStr = paste(modelFormulaStr, "+", residualModelFormulaTerms[i])
-      }
-    }
-  }
-  
-  model_tbl = fit_models(signature_cds_subset, 
-                         model_formula_str = modelFormulaStr, 
-                         reltol=1e-5, 
-                         verbose=TRUE)
-  model_coefs = coefficient_table(model_tbl) %>% dplyr::select(-model,-model_summary)
-  model_coefs
-
-}
-#######
 #######################################################################
 
 ### Load dataset. Corresponds to GSM7056149_sciPlexGxE_2_preprocessed_cds.list.RDS in the GEO repository.
@@ -478,7 +421,7 @@ colData_df.list[["A172"]] <- colData(cds.list[["A172"]])
 colData_df.list[["T98G"]] <- colData(cds.list[["T98G"]])
 colData_df.list[["U87MG"]] <- colData(cds.list[["U87MG"]])
 
-A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
 A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",A172_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["A172"]])
 
 A172_NTC_replicate_df <- data.frame(NTC_cell = c("NTC_ref_mean_replicate_1","NTC_ref_mean_replicate_2"),
@@ -530,7 +473,7 @@ A172_upregulated_dose_responsive_genes_angular_distance_test_res.list[[drug]] <-
 
 # saveRDS(A172_upregulated_dose_responsive_genes_angular_distance_test_res.list,"A172_upregulated_dose_responsive_genes_angular_distance_test_res_mean_ref.list.rds")
 
-T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
 T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",T98G_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["T98G"]])
 
 T98G_NTC_replicate_df <- A172_NTC_replicate_df
@@ -581,7 +524,7 @@ for(drug in c("lapatinib","nintedanib","trametinib","zstk474")){
 
 # saveRDS(T98G_upregulated_dose_responsive_genes_angular_distance_test_res.list,"T98G_upregulated_dose_responsive_genes_angular_distance_test_res_mean_ref.list.rds")
 
-U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref_102022.list.rds")
+U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list <-  readRDS("U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_mean_ref.list.rds")
 U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances_df <- do.call("rbind",U87MG_upregulated_dose_responsive_genes_genetic_perturbed_angular_distances.list[["U87MG"]])
 
 U87MG_NTC_replicate_df <- A172_NTC_replicate_df
