@@ -462,8 +462,8 @@ median(mean_target_knockdown.list[["T98G"]][!(is.na(mean_target_knockdown.list[[
 median(mean_target_knockdown.list[["U87MG"]][!(is.na(mean_target_knockdown.list[["U87MG"]]$mean_knockdown) | is.infinite(mean_target_knockdown.list[["U87MG"]]$mean_knockdown)),]$mean_knockdown)
 median(mean_target_knockdown.list[["U87MG"]][!(is.na(mean_target_knockdown.list[["U87MG"]]$mean_random_knockdown) | is.infinite(mean_target_knockdown.list[["U87MG"]]$mean_random_knockdown)),]$mean_random_knockdown)
 
-# saveRDS(mean_target_knockdown.list,"mean_target_knockdown.list_updated_110120.rds")
-# mean_target_knockdown.list <- readRDS("mean_target_knockdown.list_updated_110120.rds")
+# saveRDS(mean_target_knockdown.list,"mean_target_knockdown.list.rds")
+# mean_target_knockdown.list <- readRDS("mean_target_knockdown.list.rds")
 
 mean_target_knockdown_df <- reshape2::melt(mean_target_knockdown.list)
 colnames(mean_target_knockdown_df) <- c("gene_id","type","mean_knockdown","cell_line")
