@@ -168,8 +168,8 @@ for(cell_type in names(NTC_cds.list)){
   rm(cds_subset,diff_test)
 }
 
-# saveRDS(treatment_dose_dependent_diff_test.list, "treatment_dose_dependent_diff_test_updated_113020.list.rds")
-treatment_dose_dependent_diff_test.list <- readRDS("treatment_dose_dependent_diff_test_updated_113020.list.rds")
+# saveRDS(treatment_dose_dependent_diff_test.list, "treatment_dose_dependent_diff_test.list.rds")
+treatment_dose_dependent_diff_test.list <- readRDS("treatment_dose_dependent_diff_test.list.rds")
 
 for(cell_type in names(treatment_dose_dependent_diff_test.list)){
   
