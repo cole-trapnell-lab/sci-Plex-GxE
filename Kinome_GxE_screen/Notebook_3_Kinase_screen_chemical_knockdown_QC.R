@@ -276,7 +276,7 @@ calculate_mean_target_knockdown <- function(cds, gene_short_name_list, protein_t
 ### Load dataset. Corresponds to GSM7056149_sciPlexGxE_2_preprocessed_cds.list.RDS in the GEO repository.
 cds.list <- readRDS("cds.list.RDS")
 
-### Filter dataset for cells expressing 1 sgRNA and remove MT encoded genes from downstream analyses.
+### Filter dataset for cells expressing 1 sgRNA and remove MT genes from downstream analyses.
 MT_genes <- read.table("MT_genes.txt", header = FALSE)
 MT_genes <- as.character(MT_genes$V1)
 
