@@ -56,7 +56,7 @@ fit_proliferation_index_models <- function(df_subset,df, drug = drug, pseudocoun
 ### Load dataset. Corresponds to GSM7056149_sciPlexGxE_2_preprocessed_cds.list.RDS in the GEO repository.
 cds.list <- readRDS("cds.list.RDS")
 
-### Filter dataset for cells expressing 1 sgRNA and remove MT encoded genes from downstream analyses.
+### Filter dataset for cells expressing 1 sgRNA and remove MT genes from downstream analyses.
 MT_genes <- read.table("MT_genes.txt", header = FALSE)
 MT_genes <- as.character(MT_genes$V1)
 
