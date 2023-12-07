@@ -1,5 +1,5 @@
 library(devtools)
-library(gridExtra) ## new
+library(gridExtra)
 library(ggplot2)
 library(plyr)
 library(dplyr)
