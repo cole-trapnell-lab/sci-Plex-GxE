@@ -1,4 +1,5 @@
 library(devtools)
+library(gridExtra) ## new
 library(ggplot2)
 library(plyr)
 library(dplyr)
@@ -12,9 +13,9 @@ library(monocle3)
 ### Source files and functions including those from our previous sci-plex repository
 ### (https://github.com/cole-trapnell-lab/sci-plex)
 source("perturbation_dose_response.R")
-source("sci-plex/bin/cell_cycle.R")
-source("sci-plex/bin/GSA_helper_functions.R")
-cc.genes = readRDS("sci-plex/bin/cc.genes.RDS")
+source("~/Documents/github_repos/sci-plex/bin/cell_cycle.R")
+source("~/Documents/github_repos/sci-plex/bin/GSA_helper_functions.R")
+cc.genes = readRDS("~/Documents/github_repos/sci-plex/bin/cc.genes.RDS")
 
 ### Set DelayedArray Parameters
 DelayedArray:::set_verbose_block_processing(TRUE)
@@ -346,7 +347,7 @@ calculate_pairwise_perturbed_angular_distances <- function(cds, feature_genes, f
   row.names(NTC_colData) <- c("NTC_mean")
   NTC_colData$cell <- row.names(NTC_colData)
   NTC_colData$Size_Factor <- 1
-  NTC_colData$dose <- 100 ## changed here was
+  NTC_colData$dose <- 100 
   NTC_colData$treatment <- c("temozolomide")
   NTC_colData$gene_id <- c("NTC_mean")
 
@@ -613,17 +614,18 @@ CDKN1A_cds_subset <- TMZ_cds[rowData(TMZ_cds)$gene_short_name == "CDKN1A",colDat
 colData(CDKN1A_cds_subset)$gene_id <- factor(colData(CDKN1A_cds_subset)$gene_id,
                                              levels = rev(c("MSH2","MSH6","MLH1","PMS2","MSH3","MGMT","NTC")))
 
-plot_genes_violin(CDKN1A_cds_subset, min_expr = 0.1, group_cells_by = "gene_id") +
+plot_genes_violin(CDKN1A_cds_subset, min_expr = 0.1, group_cells_by = "gene_id", pseudocount = 1) +
   theme(text = element_text(size = 6),
+        axis.text.x = element_text(angle = 45, hjust = 1),
         strip.text.x = element_text(size = 9)) +
   scale_fill_manual(values = c("NTC" = "grey70","MGMT" = "grey70", "MSH3" = "grey70",
                                "MSH2" = "darkorange2","MSH6" = "darkorange2",
                                "MLH1" = "darkorange2", "PMS2" = "darkorange2")) +
-  xlab("Perturbation") +
-  ggsave("Marker_plots/CDKN1A_high_dose_violin.png",
-         width = 2,
+  xlab("Perturbation")
+ggsave("Marker_plots/CDKN1A_high_dose_violin.png",
+         width = 1.25,
          height  = 1.5,
-         dpi = 600)
+         dpi = 900)
 
 # Identify differentially expressed genes as a function of genotype for every dose of drug tested
 targets <- unique(colData(TMZ_cds)$gene_id)
@@ -691,7 +693,7 @@ for(target in targets){
 # saveRDS(kd_diff_test.list,"genotype_dependent_degs_tests_by_dose.list.rds")
 # write.table(kd_diff_test_results, "MMR_perturbation_diff_test_results.txt", sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
 
-# kd_diff_test.list <- readRDS("genotype_dependent_degs_tests_by_dose.list.rds")
+kd_diff_test.list <- readRDS("genotype_dependent_degs_tests_by_dose.list.rds")
 kd_diff_test_results <- do.call("rbind", kd_diff_test.list)
 kd_diff_test_results <- kd_diff_test_results[!is.na(kd_diff_test_results$p_value),]
 
@@ -750,8 +752,8 @@ ggplot(kd_diff_test_results_filtered, aes(x = normalized_effect,
   xlab("Effect size") +
   ylab("-log(p adj)") +
   scale_color_manual("MGMT\nDEG\n(FDR < 0.5%)", values = c("TRUE" = "red", "FALSE" = "black")) +
-  guides(guides(colour = guide_legend(override.aes = list(size=2)))) +
-  ggsave("DEG_testing/Effect_size_distribution_MGMT.png", 
+  guides(guides(colour = guide_legend(override.aes = list(size=2))))
+ggsave("DEG_testing/Effect_size_distribution_MGMT.png", 
          dpi = 600, width = 1.5, height = 1)
 
 kd_sig_genes <- kd_diff_test_results_filtered %>%
@@ -807,35 +809,33 @@ sig_genes_matrix<- as.data.frame(sig_genes_matrix)
 row.names(sig_genes_matrix) <- sig_genes_matrix$id
 sig_genes_matrix$id <- NULL
 
-sig_genes_cor_matrix <- cor(sig_genes_matrix,
-                            use = "complete", 
-                            method = "pearson")
+sig_genes_cor_matrix_kendall <- cor(sig_genes_matrix,
+                                    use = "complete", 
+                                    method = "kendall")
 
 hmcols <- colorRampPalette(c("white","lightpink2","firebrick2","firebrick4"))(35)
 
-dir.create("Heatmaps")
-
-correlation_ph <- pheatmap::pheatmap(sig_genes_cor_matrix,
-                                     file = "Heatmaps/Correlation_heatmap_Supplementary_Figure_2F.png",
-                                     color = hmcols,
-                                     treeheight_row = 15,
-                                     treeheight_col = 15,
-                                     cutree_rows = 5,
-                                     cutree_cols = 5,
-                                     height = 3,
-                                     width = 3,
-                                     fontsize = 6,
-                                     fontsize_col = 3,
-                                     fontsize_row = 3) 
+correlation_ph_kendall <- pheatmap::pheatmap(sig_genes_cor_matrix_kendall,
+                                             file = "Heatmaps/Correlation_heatmap_Supplementary_Figure_2F.png", # To do: change title for github repo
+                                             color = hmcols,
+                                             treeheight_row = 15,
+                                             treeheight_col = 15,
+                                             cutree_rows = 10,
+                                             cutree_cols = 10,
+                                             height = 3,
+                                             width = 3,
+                                             fontsize = 6,
+                                             fontsize_col = 3,
+                                             fontsize_row = 3) 
 
 ### Inspect correlation coefficients at the top doses of drug
-MMR_pertubed_sig_genes_cor_matrix_subset <- sig_genes_cor_matrix[c("MSH2_50","MSH6_50","MLH1_50","PMS2_50",
+MMR_pertubed_sig_genes_cor_matrix_subset_kendall <- sig_genes_cor_matrix_kendall[c("MSH2_50","MSH6_50","MLH1_50","PMS2_50",
                                                                    "MSH2_100","MSH6_100","MLH1_100","PMS2_100"),
                                                                  c("MSH2_50","MSH6_50","MLH1_50","PMS2_50",
                                                                    "MSH2_100","MSH6_100","MLH1_100","PMS2_100")]
 
-max(MMR_pertubed_sig_genes_cor_matrix_subset[MMR_pertubed_sig_genes_cor_matrix_subset != 1])
-min(MMR_pertubed_sig_genes_cor_matrix_subset)
+### Report the mean Kendall's tau across expected MMR perturbing genotypes exposed to highest doses of drug for main text
+round(mean(MMR_pertubed_sig_genes_cor_matrix_subset_kendall[MMR_pertubed_sig_genes_cor_matrix_subset_kendall != 1]), digits = 1)
 
 ### Inspect the distribution of cell states as a function of genotype and treatment
 TMZ_cds <- preprocess_cds(TMZ_cds,
@@ -1087,8 +1087,8 @@ gene_module_df <- find_gene_modules(TMZ_cds[kd_sig_genes,],
                                     cores = 1)
 
 # saveRDS(gene_module_df, "gene_modules_across_genotype_dependent_degs_df.rds")
-#gene_module_df <- readRDS("gene_modules_across_genotype_dependent_degs_df.rds")
-#write.table(gene_module_df, "Gene_modules_across_MMR_pertrubed_DEGs.txt", sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+# gene_module_df <- readRDS("gene_modules_across_genotype_dependent_degs_df.rds")
+# write.table(gene_module_df, "Gene_modules_across_MMR_pertrubed_DEGs.txt", sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
 
 cell_group_df <- tibble::tibble(cell=row.names(colData(TMZ_cds[,colData(TMZ_cds)$dose %in% c(10,50,100)])), 
                                 cell_group=colData(TMZ_cds[,colData(TMZ_cds)$dose %in% c(10,50,100)])$gene_id)
@@ -1174,8 +1174,8 @@ TMZ_dose_response_diff_test <- coefficient_table(TMZ_dose_response_diff_test) %>
 
 
 # saveRDS(TMZ_dose_response_diff_test, "NTC_TMZ_dose_response_diff_test.rds")
-#TMZ_dose_response_diff_test <- readRDS("NTC_TMZ_dose_response_diff_test.rds")
-#write.table(TMZ_dose_response_diff_test, "NTC_TMZ_dose_diff_test.txt", quote = FALSE, row.names = FALSE, col.names = TRUE)
+# TMZ_dose_response_diff_test <- readRDS("NTC_TMZ_dose_response_diff_test.rds")
+# write.table(TMZ_dose_response_diff_test, "NTC_TMZ_dose_diff_test.txt", quote = FALSE, row.names = FALSE, col.names = TRUE)
 
 TMZ_dose_response_diff_test <- TMZ_dose_response_diff_test %>%
   filter(!is.na(p_value)) %>%
@@ -1286,7 +1286,8 @@ ggplot(TMZ_dose_response_angular_distance_df,
         legend.position = "none",
         axis.text.x = element_text(size = 4, angle = 45, hjust = 1)) +
   xlab("[Temozolomide] (µM)") +
-  ylab("Pairwise angular\ndistance to 100 µM NTC")
+  ylab("Pairwise angular\ndistance to 100 µM NTC") +
+  ggpubr::stat_compare_means(size = 1.5, method = "anova", label = "p.signif",label.y = -0.3, label.x = 4)
   #guides(guides(fill = guide_legend(override.aes = list(size=2))))
 ggsave("Angular_distance/Angular_distance_to_mean_100uM_NTC_TMZ_sig_genes_Figure_2H.png", dpi = 600, height = 1.25, width = 3.5)
 
@@ -1297,7 +1298,7 @@ ggplot(TMZ_dose_response_angular_distance_df,
   geom_violin(color = "black", size = 0.1) +
   facet_wrap(~factor(gene_id,levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")), nrow = 1) +
   stat_summary(fun=mean, geom="point", size = 0.1) +
-  monocle3:::monocle_themxe_opts() +
+  monocle3:::monocle_theme_opts() +
   scale_fill_manual("Dose (µM)",
                     values = c("0"="gray", "0.1"="#1D1147FF", 
                                "0.5"="#51127CFF", "1"="#822681FF",
@@ -1307,9 +1308,10 @@ ggplot(TMZ_dose_response_angular_distance_df,
         legend.position = "none",
         axis.text.x = element_text(size = 4, angle = 45, hjust = 1)) +
     xlab("[Temozolomide] (µM)") +
-  ylab("Pairwise Jensen-Shannon\ndistance to 100 µM NTC")
+  ylab("Pairwise Jensen-Shannon\ndistance to 100 µM NTC") +
+  ggpubr::stat_compare_means(size = 1.5, method = "anova", label = "p.signif",label.y = -0.1, label.x = 4)
   #guides(guides(fill = guide_legend(override.aes = list(size=2))))
-ggsave("Angular_distance/Jensen-Shannon_distance_to_mean_100uM_NTC_TMZ_sig_genes_Supplementary_Figure_2J.png", dpi = 600, height = 1.25, width = 3.5)
+ggsave("Angular_distance/Jensen-Shannon_distance_to_mean_100uM_NTC_TMZ_sig_genes_Supplementary_Figure_3J.png", dpi = 600, height = 1.25, width = 3.5)
 
 TMZ_dose_response_angular_distance_matrix <- TMZ_dose_response_angular_distance_df %>%
   group_by(gene_id,dose) %>%
@@ -1340,24 +1342,13 @@ pheatmap(TMZ_dose_response_angular_distance_matrix[c("NTC","MGMT","MSH3","PMS2",
 
 ### Summarize the effect of perturbation on angular distance to 100 µM NTC and obtain fit information for 
 ### each genotype
-angular_distance_summary <- TMZ_dose_response_angular_distance_df %>%
-  mutate(ang.distance = as.numeric(ang.distance), dose = as.numeric(dose)) %>%
-  group_by(dose, gene_id) %>%
-  dplyr::summarise(mean_angular_distance = mean(ang.distance),
-                   sd_angular_distance = sd(ang.distance))  %>%
-  group_by(gene_id) %>%
-  dplyr::mutate(norm_mean_angular_distance = mean_angular_distance/mean_angular_distance[dose == "0"]) %>%
-  ungroup() %>%
-  mutate(dose = as.numeric(dose))
 
-y_min <- min(log10(angular_distance_summary$norm_mean_angular_distance))
-
-ggplot(angular_distance_summary, aes(x = log10(dose + 0.01), y =  log10(norm_mean_angular_distance))) +
-  geom_point(size = 0.5) +
-  facet_wrap(~factor(gene_id, levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")), ncol = 3) +
+ggplot(TMZ_dose_response_angular_distance_df, aes(x = log10(as.numeric(dose) + 0.01), y =  log10(ang.distance))) +
+  geom_point(size = 0.1) +
+  facet_wrap(~factor(gene_id, levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")), ncol = 4) +
   geom_smooth(method = "lm", formula = y~x, color = "brown4", size = 0.5) +
-  ggpubr::stat_regline_equation(size = 1.5, label.y = -0.25) +
-  ylim(y_min,NA) +
+  ggpubr::stat_regline_equation(size = 1.5, label.y = -1) +
+  #ylim(y_min,NA) +
   monocle3:::monocle_theme_opts() +
   xlab("log10(Dose + 0.01)") +
   ylab("log10(Normalized mean angular distance)") +
@@ -1365,105 +1356,120 @@ ggplot(angular_distance_summary, aes(x = log10(dose + 0.01), y =  log10(norm_mea
         legend.key.width = unit(0.4,"line"),
         legend.key.height = unit(0.4,"line"))
 ggsave("Angular_distance/Mean_angular_distances_by_pertubation_Supplementary_Figure_3K.png",
-         width =  2.5, height = 3, dpi =  600)
-
-### Repeat the above fits downsampling to 25 cells per genotype of interest
-set.seed(2016L)
-TMZ_dose_response_angular_distance_df_downsampled <- TMZ_dose_response_angular_distance_df %>%
-  group_by(gene_id,dose) %>%
-  filter(cell_1 %in% sample(cell_1, 25, replace = FALSE))
-
-angular_distance_summary_downsampled <- TMZ_dose_response_angular_distance_df_downsampled %>%
-  mutate(ang.distance = as.numeric(ang.distance), dose = as.numeric(dose)) %>%
-  group_by(dose, gene_id) %>%
-  dplyr::summarise(mean_angular_distance = mean(ang.distance),
-                   sd_angular_distance = sd(ang.distance))  %>%
-  group_by(gene_id) %>%
-  dplyr::mutate(norm_mean_angular_distance = mean_angular_distance/mean_angular_distance[dose == "0"]) %>%
-  #dplyr::mutate(norm_mean_angular_distance = ifelse(norm_mean_angular_distance < 1,norm_mean_angular_distance,1)) %>%
-  ungroup() %>%
-  mutate(dose = as.numeric(dose))
-
-y_min_downsampled <- min(log10(angular_distance_summary_downsampled$norm_mean_angular_distance))
-
-ggplot(angular_distance_summary_downsampled, aes(x = log10(dose + 0.01), y =  log10(norm_mean_angular_distance))) +
-  geom_point(size = 0.5, stroke = 0) +
-  facet_wrap(~factor(gene_id, levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")), ncol = 3) +
-  geom_smooth(method = "lm", formula = y~x, color = "brown4", size = 0.25) +
-  ggpubr::stat_regline_equation(size = 0.7, label.y = -0.25) +
-  #ggpubr::stat_cor(label.y = -0.12, size = 1)+ 
-  ylim(y_min_downsampled,NA) +
-  monocle3:::monocle_theme_opts() +
-  xlab("log10(Dose + 0.01)") +
-  ylab("log10(Normalized mean angular distance)") +
-  theme(text = element_text(size = 6),
-        axis.text = element_blank(),
-        legend.key.width = unit(0.4,"line"),
-        legend.key.height = unit(0.4,"line"))
-ggsave("Angular_distance/Mean_angular_distances_by_pertubation_downsampled_Supplementary_Figure_3L.png",
-       width = 1.25, height = 2, dpi =  600)
+       width =  3.25, height = 2, dpi =  900)
 
 #### Extract the transcriptional effective concentration 50 (TC50) for NTC
-NTC_summary <- angular_distance_summary[angular_distance_summary$gene_id == "NTC",]
-NTC_drm_model <- drc::drm(mean_angular_distance ~ dose, 
-    data = NTC_summary, 
-    fct=drc::LL.4(), 
-    type = "Poisson")
-
-NTC_drm_model_coef <- coef(NTC_drm_model)
-NTC_drm_model_ed <- drc::ED(NTC_drm_model,50, interval="delta", display=FALSE)
-
-NTC_EC50 <- NTC_drm_model_ed[1]
-
-#### Extract the transcriptional effective concentration 50 (TC50) for NTC after downsampling
-NTC_summary_downsampled <- angular_distance_summary_downsampled[angular_distance_summary_downsampled$gene_id == "NTC",]
-NTC_drm_model_downsampled <- drc::drm(mean_angular_distance ~ dose, 
-                          data = NTC_summary_downsampled, 
-                          fct=drc::LL.4(), 
+NTC_summary_all_cells <- TMZ_dose_response_angular_distance_df[TMZ_dose_response_angular_distance_df$gene_id == "NTC",]
+NTC_drm_model_all_cells <- drc::drm(ang.distance ~ as.numeric(dose),
+                          data = NTC_summary_all_cells,
+                          fct=drc::LL.4(),
                           type = "Poisson")
 
-NTC_drm_model_coef_downsampled <- coef(NTC_drm_model_downsampled)
-NTC_drm_model_ed_downsampled <- drc::ED(NTC_drm_model_downsampled,50, interval="delta", display=FALSE)
+NTC_drm_model_coef_all_cells <- coef(NTC_drm_model_all_cells)
+NTC_drm_model_ed_all_cells <- drc::ED(NTC_drm_model_all_cells,50, interval="delta", display=FALSE)
 
-NTC_EC50_downsampled <- NTC_drm_model_ed_downsampled[1]
+NTC_EC50_all_cells <- NTC_drm_model_ed_all_cells[1]
 
-### Extrapolate the amount of TMZ necessary for each genotype to reach the pairwise transcriptome distance to control at the NTC TC50
-### This was calculated from the fits above
-Dq_df <- data.frame(row.names = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2"),
-                    gene_id = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2"),
-                    Inferred_EC50 = c(7.260921,11.94835032,15.61118201,20130.32185,3050842.216,9.27833e14,9.3116e49))
+#### Calculate inferred TC50s and bootstrap to obtain confidence intervals
 
-Dq_df <- Dq_df %>% mutate(gene_id = factor(gene_id,levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")))
+get_TC_50s <- function(df, genotypes = c("MSH2","MSH6","MLH1","PMS2","MSH3","MGMT"), reference = "NTC"){
+  
+  reference_df <- df[df$gene_id == reference,]
+  reference_drm_model_all_cells <- drc::drm(ang.distance ~ as.numeric(dose), 
+                                      data = reference_df, 
+                                      fct=drc::LL.4(), 
+                                      type = "Poisson")
+  
+  reference_drm_model_coef <- coef(reference_drm_model_all_cells)
+  reference_drm_model_ed <- drc::ED(reference_drm_model_all_cells,50, interval="delta", display=FALSE)
+  
+  reference_TC50 <- reference_drm_model_ed[1]
+  
+  lm_fit.list <- list()
+  
+  for(genotype in c(reference,genotypes)){
+    
+    genotype_subset_df <- TMZ_dose_response_angular_distance_df %>% 
+      filter(gene_id == genotype) %>% 
+      mutate(dose = as.numeric(dose))
+    
+    lm_fit <- lm(formula = log10(ang.distance)~log10(dose + 0.01), data = genotype_subset_df)
+    
+    lm_coef <- broom::tidy(lm_fit)
+    lm_coef$genotype <- genotype
+    
+    lm_fit.list[[genotype]] <- lm_coef
+    
+    rm(genotype_subset_df,lm_fit,lm_coef)
+  
+    }
+
+  lm_fits_per_genotype <- do.call("rbind", lm_fit.list)
+
+  reference_ang_distance_at_TC50 = log10(reference_TC50 + 0.01)*(lm_fits_per_genotype %>% filter(genotype == reference, term == "log10(dose + 0.01)") %>% pull(estimate)) + 
+    (lm_fits_per_genotype %>% filter(genotype == reference, term == "(Intercept)") %>% pull(estimate))
+
+  query_TC50.list <- list()
+  for(gene in c(reference,genotypes)){
+   
+    log_dose_pseudocount = (reference_ang_distance_at_TC50 - (lm_fits_per_genotype %>% filter(genotype == gene, term == "(Intercept)") %>% pull(estimate))) / 
+      (lm_fits_per_genotype %>% filter(genotype == gene, term == "log10(dose + 0.01)") %>% pull(estimate))
+
+    query_TC50 = 10^log_dose_pseudocount - 0.01
+    
+    query_TC50_df <- data.frame(genotype = gene, TC50 = query_TC50)
+    
+    query_TC50.list[[gene]] <- query_TC50_df
+    
+    rm(log_dose_pseudocount,query_TC50,query_TC50_df)
+    
+    }
+  
+  query_TC50.list[[reference]]<- data.frame(genotype = reference, TC50 = reference_TC50)
+  
+  query_TC50s <- do.call("rbind",query_TC50.list)
+  
+  return(query_TC50s)
+
+}
+
+bootstrapped_matrix.list <- list()
+
+for(iteration in 1:1000){
+  set.seed(iteration)
+  df_subset <- TMZ_dose_response_angular_distance_df %>%
+    sample_n(round(nrow(TMZ_dose_response_angular_distance_df)*.75))
+  
+  genotype_TC50s <- get_TC_50s(df = df_subset)
+  genotype_TC50s$iteration <- iteration
+  
+  bootstrapped_matrix.list[[iteration]] <- genotype_TC50s
+  
+  print(iteration)
+}
+
+bootstrapped_TC50s <- do.call("rbind",bootstrapped_matrix.list)
+bootstrapped_TC50s_mean <- bootstrapped_TC50s %>%
+  group_by(genotype) %>%
+  summarize(TC50 = mean(TC50))
+colnames(bootstrapped_TC50s_mean) <- c("gene_id", "Inferred_EC50")
 
 max_molarity <- 55.49*1e6
 
-ggplot(Dq_df,aes(x = gene_id, y = log10(Inferred_EC50),  fill = gene_id)) +
+bootstrapped_TC50_summary <- bootstrapped_TC50s %>%
+  group_by(genotype) %>%
+  summarize(mean_TC50 = mean(TC50),
+            CI_lower = t.test(TC50, conf.level = 0.95)$conf.int[1],
+            CI_upper = t.test(TC50, conf.level = 0.95)$conf.int[2]) %>%
+  distinct()
+
+ggplot(bootstrapped_TC50_summary, aes(x = factor(genotype, levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")), 
+                               y = log10(mean_TC50), 
+                               fill = factor(genotype, levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")))) +
   geom_bar(stat = "identity", color = "black", size = 0.1) +
-  geom_hline(yintercept = log10(max_molarity), color = "black", size = 0.125, linetype = "dashed") +
-  monocle3:::monocle_theme_opts() +
-  theme(text = element_text(size = 6),
-        axis.text.x = element_text(angle  = 45, hjust = 1),
-        legend.position = "none") +
-  scale_fill_manual("Perturbation",values = c("NTC" = "grey70","MGMT" = "grey70", "MSH3" = "grey70",
-                                          "MSH2" = "darkorange2","MSH6" = "darkorange2",
-                                          "MLH1" = "darkorange2", "PMS2" = "darkorange2")) +
-  scale_y_log10() +
-  coord_flip() +
-  xlab("Perturbation") +
-  ylab("Inferred Transcriptional\nEC50 (µM)")
-ggsave("Angular_distance/Relative_EC50_of_angular_distance_fits_Figure_2I.png",
-         width = 1.5, height = 1.25, dpi = 600)
-
-# Recalculate inferred TC50s for the downsampled data
-Dq_df_downsampled <- data.frame(row.names = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2"),
-                    gene_id = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2"),
-                    Inferred_EC50 = c(8.579367,6.33920968,33.71360704,778.9984155,8529.461533,1.00286e51,1.52927e27))
-
-Dq_df_downsampled <- Dq_df_downsampled %>% mutate(gene_id = factor(gene_id,levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")))
-
-ggplot(Dq_df_downsampled,aes(x = gene_id, y = log10(Inferred_EC50),  fill = gene_id)) +
-  geom_bar(stat = "identity", color = "black", size = 0.1) +
-  geom_hline(yintercept = log10(max_molarity), color = "black", size = 0.125, linetype = "dashed") +
+  geom_hline(yintercept = log10(max_molarity), linetype = "dashed", size = 0.1, color = "black") +
+  geom_errorbar(aes(ymin = log10(mean_TC50 - CI_lower), ymax = log10(mean_TC50 + CI_upper)), size = 0.1, color = "black") +
+  #geom_boxplot(size = 0.02, outlier.size = 0.25, outlier.stroke = 0.025, notch = TRUE) +
   monocle3:::monocle_theme_opts() +
   theme(text = element_text(size = 6),
         axis.text.x = element_text(angle  = 45, hjust = 1),
@@ -1471,10 +1477,141 @@ ggplot(Dq_df_downsampled,aes(x = gene_id, y = log10(Inferred_EC50),  fill = gene
   scale_fill_manual("Perturbation",values = c("NTC" = "grey70","MGMT" = "grey70", "MSH3" = "grey70",
                                               "MSH2" = "darkorange2","MSH6" = "darkorange2",
                                               "MLH1" = "darkorange2", "PMS2" = "darkorange2")) +
-  scale_y_log10() +
-  coord_flip() +
   xlab("Perturbation") +
-  ylab("Inferred Transcriptional\nEC50 (µM)")
-ggsave("Angular_distance/Relative_EC50_of_angular_distance_fits_downsampled_Supplementary_Figure_3M.png",
-       width = 1.5, height = 1.25, dpi = 600)
+  ylab("Inferred Transcriptional \nEC50 (log10[µM])") +
+  coord_flip() 
+ggsave("Angular_distance/Relative_EC50_of_angular_distance_fits_Figure_2I.png",
+       width = 1.5, height = 1.25, dpi = 900)
+
+ggplot(bootstrapped_TC50_summary %>% filter(!(genotype %in% c("MSH2","MSH6"))), aes(x = factor(genotype, levels = c("NTC","MGMT","MSH3","PMS2","MLH1")), 
+                                      y = log10(mean_TC50), 
+                                      fill = factor(genotype, levels = c("NTC","MGMT","MSH3","PMS2","MLH1")))) +
+  geom_bar(stat = "identity", color = "black", size = 0.1) +
+  geom_hline(yintercept = log10(max_molarity), linetype = "dashed", size = 0.1, color = "black") +
+  geom_errorbar(aes(ymin = log10(mean_TC50 - CI_lower), ymax = log10(mean_TC50 + CI_upper)), size = 0.1, color = "black") +
+  #geom_boxplot(size = 0.02, outlier.size = 0.25, outlier.stroke = 0.025, notch = TRUE) +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 4),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual("Perturbation",values = c("NTC" = "grey70","MGMT" = "grey70", "MSH3" = "grey70",
+                                              "MSH2" = "darkorange2","MSH6" = "darkorange2",
+                                              "MLH1" = "darkorange2", "PMS2" = "darkorange2")) +
+  coord_flip() 
+ggsave("Angular_distance/Relative_EC50_of_angular_distance_fits_Figure_2I_insert.png",
+       width = 0.75, height = 0.6, dpi = 900)
+
+#### Re-calculate inferred TC50s and bootstraps on subsets of the data
+
+downsampled_bootstrapped_matrix.list <- list()
+
+for(downsampled in c(0.1,0.2,0.5,1)){
   
+  downsampled_bootstrapped_matrix.list[[as.character(downsampled)]] <- list()
+
+  message("Calculating inferred TC50 across a ",downsampled*100, "% downsample of the data")
+  
+  TMZ_dose_response_angular_distance_df_downsampled <- TMZ_dose_response_angular_distance_df %>%
+    sample_n(round(nrow(TMZ_dose_response_angular_distance_df)*downsampled))
+
+  for(iteration in 1:1000){
+    set.seed(iteration)
+    downsampled_df_subset <- TMZ_dose_response_angular_distance_df_downsampled %>%
+      sample_n(round(nrow(TMZ_dose_response_angular_distance_df_downsampled)*.75))
+    
+    downsampled_genotype_TC50s <- get_TC_50s(df = downsampled_df_subset)
+    downsampled_genotype_TC50s$iteration <- iteration
+    
+    downsampled_bootstrapped_matrix.list[[as.character(downsampled)]][[iteration]] <- downsampled_genotype_TC50s
+    downsampled_bootstrapped_matrix.list[[as.character(downsampled)]][[iteration]]$batch <- as.character(downsampled)
+    print(iteration)
+  }
+ 
+}
+
+downsampled_bootstrapped_TC50s.list <- list()
+
+for(downsampled in c(0.1,0.2,0.5,1)){
+downsampled_bootstrapped_TC50s.list[[as.character(downsampled)]] <- do.call("rbind",downsampled_bootstrapped_matrix.list[[as.character(downsampled)]])
+}
+
+downsampled_bootstrapped_TC50s <- do.call("rbind",downsampled_bootstrapped_TC50s.list)
+
+ggplot(downsampled_bootstrapped_TC50s, aes(x = factor(genotype, 
+                                                      levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")), 
+                                           y = log10(TC50),
+                                           fill = factor(genotype, 
+                                                         levels = c("NTC","MGMT","MSH3","PMS2","MLH1","MSH6","MSH2")))) +
+  geom_boxplot(size = 0.02, outlier.size = 0.01, outlier.stroke = 0.025, notch = TRUE) +
+  facet_wrap(~batch, ncol = 4) +
+  geom_hline(yintercept = log10(max_molarity), linetype = "dashed", size = 0.1, color = "black") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 6),
+        axis.text.x = element_text(angle  = 45, hjust = 1),
+        legend.position = "none") +
+  scale_fill_manual("Perturbation",values = c("NTC" = "grey70","MGMT" = "grey70", "MSH3" = "grey70",
+                                              "MSH2" = "darkorange2","MSH6" = "darkorange2",
+                                              "MLH1" = "darkorange2", "PMS2" = "darkorange2")) +
+  xlab("Perturbation") +
+  ylab("Inferred Transcriptional \nEC50 (log10[µM])")
+  #coord_flip() 
+ggsave("Angular_distance/Relative_EC50_of_angular_distance_fits_downsampled_Supplementary_Figure_2L.png",
+       width = 3.5, height = 1.25, dpi = 900)
+
+ggplot(downsampled_bootstrapped_TC50s %>% filter(!(genotype %in% c("MSH2","MSH6"))), aes(x = factor(genotype, 
+                                                      levels = c("NTC","MGMT","MSH3","PMS2","MLH1")), 
+                                           y = log10(TC50),
+                                           fill = factor(genotype, 
+                                                         levels = c("NTC","MGMT","MSH3","PMS2","MLH1")))) +
+  geom_boxplot(size = 0.02, outlier.size = 0.01, outlier.stroke = 0.025, notch = TRUE) +
+  facet_wrap(~batch, ncol = 4) +
+  geom_hline(yintercept = log10(max_molarity), linetype = "dashed", size = 0.1, color = "black") +
+  monocle3:::monocle_theme_opts() +
+  theme(text = element_text(size = 4),
+        axis.text.x = element_text(angle= 45, hjust = 1),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual("Perturbation",values = c("NTC" = "grey70","MGMT" = "grey70", "MSH3" = "grey70",
+                                              "MSH2" = "darkorange2","MSH6" = "darkorange2",
+                                              "MLH1" = "darkorange2", "PMS2" = "darkorange2")) 
+ggsave("Angular_distance/Relative_EC50_of_angular_distance_fits_downsampled_Supplementary_Figure_2L_insert.png",
+       width = 2, height = .75, dpi = 900)
+
+# Report the median cell counts for each downsampled subset
+set.seed(2016L)
+TMZ_dose_response_angular_distance_df %>%
+  sample_n(round(nrow(TMZ_dose_response_angular_distance_df)*0.1)) %>%
+  group_by(gene_id,dose) %>%
+  summarize(total_cell = n()) %>%
+  ungroup() %>%
+  pull(total_cell) %>%
+  median()
+
+set.seed(2016L)
+TMZ_dose_response_angular_distance_df %>%
+  sample_n(round(nrow(TMZ_dose_response_angular_distance_df)*0.2)) %>%
+  group_by(gene_id,dose) %>%
+  summarize(total_cell = n()) %>%
+  ungroup() %>%
+  pull(total_cell) %>%
+  median()
+
+set.seed(2016L)
+TMZ_dose_response_angular_distance_df %>%
+  sample_n(round(nrow(TMZ_dose_response_angular_distance_df)*0.5)) %>%
+  group_by(gene_id,dose) %>%
+  summarize(total_cell = n()) %>%
+  ungroup() %>%
+  pull(total_cell) %>%
+  median()
+
+set.seed(2016L)
+TMZ_dose_response_angular_distance_df %>%
+  sample_n(round(nrow(TMZ_dose_response_angular_distance_df)*1)) %>%
+  group_by(gene_id,dose) %>%
+  summarize(total_cell = n()) %>%
+  ungroup() %>%
+  pull(total_cell) %>%
+  median()
